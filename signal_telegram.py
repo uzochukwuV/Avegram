@@ -17,7 +17,8 @@ from eth_account import Account
 AVENUE_SCRIPTS = "/home/workspace/ave-cloud-skill/scripts"
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 AVE_API_KEY = os.environ.get("AVE_API_KEY", "")
-API_PLAN = os.environ.get("API_PLAN", "free")
+AVE_SECRET_KEY = os.environ.get("AVE_SECRET_KEY", "")
+API_PLAN = os.environ.get("API_PLAN", "pro")
 USERS_FILE = "/home/workspace/signal-bot/users.json"
 
 (STATE_REGISTER, STATE_DEPOSIT, STATE_TRADE_CONFIRM) = range(3)
