@@ -125,44 +125,70 @@ async def cmd_balance(u, ctx):
     await u.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 async def cmd_signal(u, ctx):
-    sys.path.insert(0, AVENUE_SCRIPTS)
-    from ave.http import api_get
-    await u.message.reply_text("Scanning for signals...")
-    seen = set(); tokens = []
-    for tag in ["hot", "defi", "meme"]:
+    await u.message.reply_text("Scanning for signals (60%+ confidence)...", parse_mode="")
+    tokens = []
+    seen = set()
+    # 1. Public signals (Ave-filtered, multi-chain)
+    try:
+        for chain in ["bsc", "solana"]:
+            url = f"https://data.ave-api.xyz/v2/signals/public/list?chain={chain}&pageSize=20&pageNO=1"
+            req = urllib.request.Request(url, headers={"X-API-KEY": AVE_API_KEY})
+            r = await asyncio.get_event_loop().run_in_executor(None, lambda u=url: urllib.request.urlopen(req, timeout=10))
+            d = json.loads(r.read())
+            for s in d.get("data", []):
+                ta = s.get("token", ""); chain_tok = s.get("chain", chain)
+                a = ta.split("-")[0] if "-" in ta else ta
+                if a and a not in seen:
+                    seen.add(a); tokens.append({"addr": a, "chain": chain_tok, "sym": s.get("symbol", "?"), "name": s.get("name", "")})
+    except: pass
+    # 2. Trending BSC tokens by keyword
+    for kw in ["PEPE", "SHIB", "DOGE", "BNB", "CAKE", "WBNB", "BTCB", "ETH", "SOL", "XRP"]:
         try:
-            pr = await api_get("/tokens/platform", {"tag": tag, "limit": 8, "chain": "bsc"})
-            for t in pr.json().get("data", []):
-                a = t.get("token", "").split("-")[0]
-                if a and a not in seen: seen.add(a); t["token"] = a; tokens.append(t)
+            url = f"https://data.ave-api.xyz/v2/tokens?keyword={kw}&limit=3&chain=bsc"
+            req = urllib.request.Request(url, headers={"X-API-KEY": AVE_API_KEY})
+            r = await asyncio.get_event_loop().run_in_executor(None, lambda u=url: urllib.request.urlopen(req, timeout=10))
+            d = json.loads(r.read())
+            for t in d.get("data", []):
+                a = (t.get("token") or "").split("-")[0]
+                if a and a not in seen: seen.add(a); tokens.append({"addr": a, "chain": "bsc", "sym": t.get("symbol", "?"), "name": t.get("name", "")})
         except: pass
-    if not tokens: await u.message.reply_text("No signals found."); return
+    if not tokens:
+        await u.message.reply_text("No tokens found to scan."); return
     signals = []
-    for tok in tokens[:20]:
+    for tok in tokens[:25]:
         try:
-            ta = tok.get("token", ""); tid = ta + "-bsc"
-            pr = await api_get("/tokens/" + tid); rd = await api_get("/contracts/" + tid)
-            pd = pr.json().get("data", {}).get("token", {}); rd2 = rd.json().get("data", {})
+            ta = tok["addr"]; chain_tok = tok["chain"]; tid = f"{ta}-{chain_tok}"
+            url1 = f"https://data.ave-api.xyz/v2/tokens/{tid}"
+            url2 = f"https://data.ave-api.xyz/v2/contracts/{tid}"
+            r1 = await asyncio.get_event_loop().run_in_executor(None, lambda u=url1: urllib.request.urlopen(urllib.request.Request(u, headers={"X-API-KEY": AVE_API_KEY}), timeout=10))
+            d1 = json.loads(r1.read())
+            r2 = await asyncio.get_event_loop().run_in_executor(None, lambda u=url2: urllib.request.urlopen(urllib.request.Request(u, headers={"X-API-KEY": AVE_API_KEY}), timeout=10))
+            d2 = json.loads(r2.read())
+            pd = d1.get("data", {}).get("token", {}); rd = d2.get("data", {})
             price = float(pd.get("current_price_usd") or 0)
             liq = float(pd.get("liquidity") or pd.get("tvl") or 0)
             vol = float(pd.get("tx_volume_u_24h") or 0)
             chg = float(pd.get("price_change_24h") or 0)
-            if rd2.get("is_honeypot") == 1 or price == 0: continue
+            if rd.get("is_honeypot") == 1 or price == 0: continue
             conf = 0
             if liq > 50000: conf += 30
             if vol > 10000: conf += 30
             if abs(chg) > 5: conf += 20
-            if rd2.get("risk_score", 50) < 30: conf += 20
+            if rd.get("risk_score", 50) < 30: conf += 20
             conf = min(100, conf)
-            if conf >= 60: signals.append({"conf": conf, "sym": tok.get("symbol", "?"), "price": price, "chg": chg, "liq": liq, "vol": vol, "addr": ta})
+            if conf >= 60:
+                signals.append({"conf": conf, "sym": tok["sym"], "price": price, "chg": chg, "liq": liq, "vol": vol, "addr": ta, "chain": chain_tok})
         except: continue
     signals.sort(key=lambda x: x["conf"], reverse=True)
-    if not signals: await u.message.reply_text("No signals above 60% confidence right now."); return
-    lines = [str(len(signals)) + " signals found (60%+ confidence)\n"]
+    if not signals:
+        await u.message.reply_text("No signals above 60% confidence right now. Try again later.")
+        return
+    lines = [f"🔔 {len(signals)} Signals Found (≥60% confidence)\n"]
     for s in signals[:8]:
-        d = "BUY" if s["chg"] < -3 else "SELL" if s["chg"] > 5 else "WATCH"
-        lines.append(d + " [" + str(s["conf"]) + "%] " + s["sym"] + " | $" + str(round(s["price"], 8)) + " | 24h:" + str(round(s["chg"], 1)) + "%")
-    await u.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        d = "🟢 BUY" if s["chg"] < -3 else "🔴 SELL" if s["chg"] > 5 else "🟡 WATCH"
+        lines.append(f"{d} [{s['conf']}%] {s['sym']} | ${round(s['price'], 8)} | 24h:{round(s['chg'],1)}% | Liq:${s['liq']:,.0f}")
+    lines.append("\n/trade <sym> <amt> to execute")
+    await u.message.reply_text("\n".join(lines))
 
 async def cmd_trade(u, ctx):
     users = load_users(); uid = str(u.effective_user.id)
