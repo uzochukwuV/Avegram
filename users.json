@@ -3,6 +3,25 @@
     "username": "visualise_crypto",
     "address": "0x8944b4c6C2Fea3f04a901093BC9f40AE3f5072ec",
     "private_key": "5b37280336dea0eb631fe3c871f293d649ed80b5697f52a80357096246fe0d47",
-    "created_at": "2026-04-14 00:29:20+00:00"
+    "created_at": "2026-04-14 00:29:20+00:00",
+    "assets_id": "472ef1fcd66f4778a8a781521f8c9cec",
+    "address_list": [
+      {
+        "chain": "bsc",
+        "address": "0x7d1a13c23b06a10eaa9045e53f87ec687b157cca"
+      },
+      {
+        "chain": "base",
+        "address": "0x7d1a13c23b06a10eaa9045e53f87ec687b157cca"
+      },
+      {
+        "chain": "eth",
+        "address": "0x7d1a13c23b06a10eaa9045e53f87ec687b157cca"
+      },
+      {
+        "chain": "solana",
+        "address": "ELqagACLTjG1vdGJSZpqjKSVXYuVFQ6BjNjas7yTFvwf"
+      }
+    ]
   }
 }
