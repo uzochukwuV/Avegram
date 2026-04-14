@@ -16,11 +16,22 @@ This specification details the improvements to the Telegram Bot's User Experienc
 - **Main Menu (`/start`)**:
   - Serves as the "Home Screen".
   - If the user has no wallet, displays a `[Create Wallet]` button.
-  - If registered, displays: `[My Portfolio]`, `[Scan Signals]`, `[Smart Money Wallets]`, `[Help]`.
+  - If registered, displays: 
+    - `[My Portfolio]`
+    - `[Trade]`
+    - `[Deposit]`
+    - `[Withdraw]`
+    - `[Scan Signals]`
+    - `[Smart Money Wallets]`
+    - `[Help]`
 - **Portfolio View (`/balance` or `[My Portfolio]`)**:
   - Replaces the current static text output.
   - Edits the existing message to show the PNL breakdown.
   - Includes buttons: `[Refresh]`, `[Trade Token]`, `[Back to Menu]`.
+- **Trade, Deposit, Withdraw Flows**:
+  - `[Deposit]` shows the user's BSC address and QR code.
+  - `[Withdraw]` prompts the user for amount and destination address (interactive state).
+  - `[Trade]` initiates a buy/sell flow with inline buttons for selecting tokens and confirming quotes.
 - **Callback Handler**:
   - A new `CallbackQueryHandler` in `signal_telegram.py` will route button clicks (e.g., `cb_portfolio`, `cb_signals`, `cb_menu`) to their respective async functions.
 
