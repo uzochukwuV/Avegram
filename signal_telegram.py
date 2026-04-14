@@ -586,8 +586,11 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/start — Welcome message\n"
         "/register — Create wallet\n"
         "/deposit — Show deposit address\n"
-        "/balance — Check wallet balance\n"
+        "/balance — Check wallet + live USD value\n"
+        "/chain bsc|eth|solana — Switch network\n"
         "/signal — Scan tokens for signals\n"
+        "/topwallets [chain] — Top smart money wallets\n"
+        "/track <address> — Track any wallet\n"
         "/trade SYMBOL AMOUNT — Get quote + execute\n"
         "/help — This message\n\n"
         "*Flow:* register → deposit USDT → trade",
