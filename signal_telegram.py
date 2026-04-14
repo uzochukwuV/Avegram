@@ -1,16 +1,19 @@
-"""SignalBot v2 - Ave proxy wallet integration"""
+"""SignalBot v2 - Ave proxy wallet integration with PNL, Copy Trading, and Alerts"""
 import os, json, asyncio, sys, urllib.request, urllib.parse, base64, datetime, hmac, hashlib
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from dotenv import load_dotenv
 
 AVENUE_SCRIPTS = "/home/workspace/ave-cloud-skill/scripts"
-load_dotenv("/home/workspace/Avegram/.env")
+if os.path.exists("/workspace/ave-cloud-skill/scripts"):
+    AVENUE_SCRIPTS = "/workspace/ave-cloud-skill/scripts"
+
+load_dotenv("/workspace/.env")
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 AVE_API_KEY = os.environ.get("AVE_API_KEY", "")
 AVE_SECRET_KEY = os.environ.get("AVE_SECRET_KEY", "")
 API_PLAN = os.environ.get("API_PLAN", "pro")
-USERS_FILE = "/home/workspace/Avegram/users.json"
+USERS_FILE = "/workspace/users.json"
 
 def load_users():
     if os.path.exists(USERS_FILE):
@@ -41,78 +44,125 @@ def proxy_post(path, body):
     req = urllib.request.Request("https://bot-api.ave.ai" + path, data=data, headers=proxy_headers("POST", path, body))
     with urllib.request.urlopen(req, timeout=15) as r: return json.loads(r.read())
 
-async def cmd_start(u, ctx):
-    await u.message.reply_text(
-        "SignalBot v2 - Proxy Wallet Bot\n\n"
-        "/register - Create your Ave proxy wallet\n"
-        "/deposit - View deposit address\n"
-        "/balance - Check portfolio\n"
-        "/quote SYMBOL [AMOUNT] - Get price quote\n"
-        "/signal - Scan for signals\n"
-        "/trade SYMBOL AMOUNT - Execute swap\n"
-        "/topwallets - Smart money wallets\n"
-        "/track ADDRESS - Track any wallet\n"
-        "/help - Commands\n\n"
+async def cmd_start(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    msg = u.message if u.message else u.callback_query.message
+    keyboard = [
+        [InlineKeyboardButton("📊 Portfolio PNL", callback_data="cmd|pnl"), InlineKeyboardButton("🔍 Scan Signals", callback_data="cmd|signal")],
+        [InlineKeyboardButton("🐳 Top Wallets", callback_data="cmd|topwallets"), InlineKeyboardButton("💼 Deposit Address", callback_data="cmd|deposit")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await msg.reply_text(
+        "🚀 *Avegram v2 - Smart Trading Bot*\n\n"
+        "Welcome! Choose an action below or use commands:\n"
+        "/register - Create proxy wallet\n"
+        "/deposit - View address\n"
+        "/balance - Check holdings\n"
+        "/pnl - Portfolio PNL Analysis\n"
+        "/quote SYM [AMT] - Get quote\n"
+        "/signal - AI Signals\n"
+        "/trade SYM AMT - Execute swap\n"
+        "/topwallets - Smart money\n"
+        "/track ADDRESS - Track wallet\n"
+        "/copy ADDRESS AMT - Auto-copy trades\n"
+        "/alert SYM PRICE - Set price alert\n\n"
         "Powered by Ave Cloud API",
-        parse_mode="Markdown"
+        parse_mode="Markdown",
+        reply_markup=reply_markup
     )
 
-async def cmd_register(u, ctx):
+async def cmd_register(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    msg = u.message if u.message else u.callback_query.message
     users = load_users()
     uid = str(u.effective_user.id)
-    # If already registered with proxy wallet, show it
     if uid in users and users[uid].get("assets_id"):
         w = users[uid]
         bsc_addr = next((a["address"] for a in w.get("address_list", []) if a["chain"] == "bsc"), "N/A")
-        await u.message.reply_text(f"Already registered\nBSC: `{bsc_addr}`", parse_mode="Markdown")
+        await msg.reply_text(f"Already registered\nBSC: `{bsc_addr}`", parse_mode="Markdown")
         return
-    # If user exists but has no proxy wallet yet, fetch existing wallets from API
-    # and attach the first one (avegram_test or user1 from your account)
     if uid in users and not users[uid].get("assets_id"):
         r = proxy_get("/v1/thirdParty/user/getUserByAssetsId")
         if r.get("status") == 200 and r.get("data"):
             wallets = r["data"]
             if wallets:
-                w = wallets[0]  # use first wallet (avegram_test)
+                w = wallets[0]
                 users[uid]["assets_id"] = w["assetsId"]
                 users[uid]["address_list"] = w.get("addressList", [])
                 save_users(users)
                 bsc_addr = next((a["address"] for a in w.get("addressList", []) if a["chain"] == "bsc"), "N/A")
-                await u.message.reply_text(f"Proxy wallet found and linked!\n\nBSC: `{bsc_addr}`\n\nThis wallet has your funded USDT. Check /balance to see your holdings.", parse_mode="Markdown")
+                await msg.reply_text(f"Proxy wallet found and linked!\n\nBSC: `{bsc_addr}`", parse_mode="Markdown")
                 return
-        await u.message.reply_text("No existing wallet found. Creating new one...")
-    # New user - create proxy wallet
+        await msg.reply_text("No existing wallet found. Creating new one...")
     r = proxy_post("/v1/thirdParty/user/generateWallet", {"assetsName": "user_" + uid[-8:], "returnMnemonic": False})
     if r.get("status") not in (200, 0) or not r.get("data"):
-        await u.message.reply_text("Registration failed: " + str(r.get("msg", ""))); return
+        await msg.reply_text("Registration failed: " + str(r.get("msg", ""))); return
     d = r["data"]
     users[uid] = {"assets_id": d["assetsId"], "address_list": d.get("addressList", []), "username": u.effective_user.username, "chain": "bsc"}
     save_users(users)
     bsc_addr = next((a["address"] for a in d.get("addressList", []) if a["chain"] == "bsc"), "N/A")
-    await u.message.reply_text(f"Proxy wallet created!\n\nBSC: `{bsc_addr}`\n\nDeposit USDT BEP20 to this address, then /balance to check.", parse_mode="Markdown")
+    await msg.reply_text(f"Proxy wallet created!\n\nBSC: `{bsc_addr}`\n\nDeposit USDT BEP20 to this address, then /balance to check.", parse_mode="Markdown")
 
-async def cmd_deposit(u, ctx):
+async def cmd_deposit(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    msg = u.message if u.message else u.callback_query.message
     users = load_users(); uid = str(u.effective_user.id)
     if uid not in users or not users[uid].get("assets_id"):
-        await u.message.reply_text("Use /register first"); return
+        await msg.reply_text("Use /register first"); return
     addr = next((a["address"] for a in users[uid].get("address_list", []) if a["chain"] == "bsc"), "N/A")
-    await u.message.reply_text(
-        "Deposit Address (BSC BEP20)\n\n" + addr + "\n\nDeposit USDT to this address",
-        parse_mode="Markdown"
-    )
+    await msg.reply_text(f"Deposit Address (BSC BEP20)\n\n`{addr}`\n\nDeposit USDT to this address", parse_mode="Markdown")
 
-async def cmd_balance(u, ctx):
+async def cmd_pnl(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    msg = u.message if u.message else u.callback_query.message
+    users = load_users()
+    uid = str(u.effective_user.id)
+    if uid not in users or not users[uid].get("assets_id"):
+        await msg.reply_text("Use /register first")
+        return
+    addr = next((a["address"] for a in users[uid].get("address_list", []) if a["chain"] == "bsc"), "N/A")
+    if addr == "N/A":
+        await msg.reply_text("No BSC address found")
+        return
+
+    sys.path.insert(0, AVENUE_SCRIPTS)
+    from ave.http import api_get
+    
+    await msg.reply_text("Calculating PNL for your BSC wallet...")
+    r = await api_get("/address/walletinfo/tokens", {"wallet_address": addr, "chain": "bsc", "sort": "balance_usd", "sort_dir": "desc", "pageSize": 20})
+    d = r.json()
+    
+    lines = ["📊 *Portfolio PNL - BSC*\n"]
+    total_bal = 0.0
+    total_profit = 0.0
+    
+    if d.get("status") == 1 and d.get("data"):
+        for t in d["data"]:
+            bal = float(t.get("balance_usd", 0) or 0)
+            if bal <= 0: continue
+            profit_pct = float(t.get("profit_pct", 0))
+            profit_usd = float(t.get("profit", 0))
+            sym = t.get("symbol", "?")
+            lines.append(f"{sym}: ${bal:.2f} | P/L: ${profit_usd:.2f} ({profit_pct:.1f}%)")
+            total_bal += bal
+            total_profit += profit_usd
+        
+        lines.append(f"\n*Total Balance:* ${total_bal:.2f}")
+        lines.append(f"*Total PNL:* ${total_profit:.2f}")
+    else:
+        lines.append("No active holdings found.")
+        
+    await msg.reply_text("\n".join(lines), parse_mode="Markdown")
+
+async def cmd_balance(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    msg = u.message if u.message else u.callback_query.message
     users = load_users(); uid = str(u.effective_user.id)
     if uid not in users or not users[uid].get("assets_id"):
-        await u.message.reply_text("Use /register first"); return
-    await u.message.reply_text("Fetching portfolio...")
+        await msg.reply_text("Use /register first"); return
+    await msg.reply_text("Fetching portfolio...")
     aid = users[uid]["assets_id"]
     r = proxy_get("/v1/thirdParty/tx/getSwapOrder", {"chain": "bsc", "assetsId": aid, "pageSize": "50", "pageNO": "0"})
     if r.get("status") not in (200, 0) or not r.get("data"):
-        await u.message.reply_text("No swap history. Deposit USDT to your BSC wallet address then try /balance again."); return
+        await msg.reply_text("No swap history."); return
     lines = ["Portfolio - BSC\n"]
-    total_usd = 0.0
-    seen = {}
+    total_usd = 0.0; seen = {}
     for o in r["data"]:
         if o.get("status") != "confirmed": continue
         sym = o.get("outTokenSymbol", "?")
@@ -122,16 +172,15 @@ async def cmd_balance(u, ctx):
         price = float(o.get("txPriceUsd", "0"))
         usd = bal * price
         total_usd += usd
-        lines.append(sym + ": " + str(round(bal, 4)) + " ($" + str(round(usd, 2)) + ")")
-    if len(lines) == 1: await u.message.reply_text("No confirmed swaps yet."); return
-    lines.append("\nTotal: $" + str(round(total_usd, 2)))
-    await u.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        lines.append(f"{sym}: {bal:.4f} (${usd:.2f})")
+    if len(lines) == 1: await msg.reply_text("No confirmed swaps yet."); return
+    lines.append(f"\nTotal: ${total_usd:.2f}")
+    await msg.reply_text("\n".join(lines), parse_mode="Markdown")
 
-async def cmd_signal(u, ctx):
-    await u.message.reply_text("Scanning for signals (60%+ confidence)...", parse_mode="")
-    tokens = []
-    seen = set()
-    # 1. Public signals (Ave-filtered, multi-chain)
+async def cmd_signal(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    msg = u.message if u.message else u.callback_query.message
+    await msg.reply_text("Scanning for signals (60%+ confidence)...")
+    tokens = []; seen = set()
     try:
         for chain in ["bsc", "solana"]:
             url = f"https://data.ave-api.xyz/v2/signals/public/list?chain={chain}&pageSize=20&pageNO=1"
@@ -144,7 +193,6 @@ async def cmd_signal(u, ctx):
                 if a and a not in seen:
                     seen.add(a); tokens.append({"addr": a, "chain": chain_tok, "sym": s.get("symbol", "?"), "name": s.get("name", "")})
     except: pass
-    # 2. Trending BSC tokens by keyword
     for kw in ["PEPE", "SHIB", "DOGE", "BNB", "CAKE", "WBNB", "BTCB", "ETH", "SOL", "XRP"]:
         try:
             url = f"https://data.ave-api.xyz/v2/tokens?keyword={kw}&limit=3&chain=bsc"
@@ -156,7 +204,7 @@ async def cmd_signal(u, ctx):
                 if a and a not in seen: seen.add(a); tokens.append({"addr": a, "chain": "bsc", "sym": t.get("symbol", "?"), "name": t.get("name", "")})
         except: pass
     if not tokens:
-        await u.message.reply_text("No tokens found to scan."); return
+        await msg.reply_text("No tokens found to scan."); return
     signals = []
     for tok in tokens[:25]:
         try:
@@ -184,16 +232,22 @@ async def cmd_signal(u, ctx):
         except: continue
     signals.sort(key=lambda x: x["conf"], reverse=True)
     if not signals:
-        await u.message.reply_text("No signals above 60% confidence right now. Try again later.")
+        await msg.reply_text("No signals above 60% confidence right now. Try again later.")
         return
-    lines = [f"🔔 {len(signals)} Signals Found (≥60% confidence)\n"]
+    await msg.reply_text(f"🔔 {len(signals)} Signals Found (≥60% confidence)\n")
     for s in signals[:8]:
         d = "🟢 BUY" if s["chg"] < -3 else "🔴 SELL" if s["chg"] > 5 else "🟡 WATCH"
-        lines.append(f"{d} [{s['conf']}%] {s['sym']} | ${round(s['price'], 8)} | 24h:{round(s['chg'],1)}% | Liq:${s['liq']:,.0f}")
-    lines.append("\n/trade <sym> <amt> to execute")
-    await u.message.reply_text("\n".join(lines))
+        text = f"{d} [{s['conf']}%] {s['sym']} | ${round(s['price'], 8)} | 24h:{round(s['chg'],1)}% | Liq:${s['liq']:,.0f}"
+        
+        keyboard = [
+            [
+                InlineKeyboardButton(f"Buy 10 USDT", callback_data=f"buy|{s['chain']}|{s['addr']}|10"),
+                InlineKeyboardButton(f"Buy 50 USDT", callback_data=f"buy|{s['chain']}|{s['addr']}|50")
+            ]
+        ]
+        await msg.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
-async def cmd_trade(u, ctx):
+async def cmd_trade(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
     users = load_users(); uid = str(u.effective_user.id)
     if uid not in users or not users[uid].get("assets_id"): await u.message.reply_text("Use /register first"); return
     if not ctx.args or len(ctx.args) < 2: await u.message.reply_text("Usage: /trade SYMBOL AMOUNT"); return
@@ -205,7 +259,7 @@ async def cmd_trade(u, ctx):
     ta = tok_data[0].get("token", "").split("-")[0]
     aid = users[uid]["assets_id"]
     usdt = "0x55d398326f99059fF775485246999027B3197955"
-    await u.message.reply_text("Getting quote for " + str(amount) + " USDT to " + sym + "...")
+    await u.message.reply_text(f"Getting quote for {amount} USDT to {sym}...")
     qr = proxy_post("/v1/thirdParty/tx/sendSwapOrder", {"chain": "bsc", "assetsId": aid, "inTokenAddress": usdt, "outTokenAddress": ta, "inAmount": str(int(amount * 1e6)), "swapType": "buy", "slippage": "500"})
     if qr.get("status") not in (200, 0):
         await u.message.reply_text("Swap failed: " + str(qr.get("msg", ""))); return
@@ -213,149 +267,294 @@ async def cmd_trade(u, ctx):
     d = qr.get("data", {})
     if isinstance(d, dict): oid = d.get("id", "")
     elif isinstance(d, list) and d: oid = d[0].get("id", "") if isinstance(d[0], dict) else str(d[0])
-    await u.message.reply_text("Swap submitted!\nOrder ID: " + oid + "\n\nCheck /balance after 30s for confirmation.", parse_mode="Markdown")
+    await u.message.reply_text(f"Swap submitted!\nOrder ID: {oid}\n\nCheck /balance after 30s.", parse_mode="Markdown")
 
-async def cmd_topwallets(u, ctx):
+async def cmd_topwallets(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    msg = u.message if u.message else u.callback_query.message
     sys.path.insert(0, AVENUE_SCRIPTS); from ave.http import api_get
     chain = "bsc"
     if ctx.args and ctx.args[0].lower() in ("bsc", "eth", "base", "solana"): chain = ctx.args[0].lower()
-    await u.message.reply_text("Loading top wallets on " + chain.upper() + "...")
+    await msg.reply_text("Loading top wallets on " + chain.upper() + "...")
     r = await api_get("/address/smart_wallet/list", {"chain": chain, "sort": "profit_above_900_percent_num", "sort_dir": "desc", "profit_900_percent_num_min": 1, "profit_300_900_percent_num_min": 3})
     d = r.json()
-    if d.get("status") != 1 or not d.get("data"): await u.message.reply_text("No wallets found on " + chain.upper()); return
-    lines = ["Top Smart Money Wallets - " + chain.upper() + "\n"]
+    if d.get("status") != 1 or not d.get("data"): await msg.reply_text("No wallets found on " + chain.upper()); return
+    
+    await msg.reply_text(f"🏆 *Top Smart Money Wallets - {chain.upper()}*", parse_mode="Markdown")
     for i, w in enumerate(d["data"][:8], 1):
-        addr = w.get("wallet_address", "")[:10] + "..."
-        lines.append(str(i) + ". " + addr + " | 900%+: " + str(w.get("profit_above_900_percent_num", 0)) + " | 300-900%: " + str(w.get("profit_300_900_percent_num", 0)))
-        lines.append("   /track " + w.get("wallet_address", ""))
-    await u.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        addr = w.get("wallet_address", "")
+        short_addr = addr[:10] + "..."
+        text = f"{i}. `{short_addr}`\n900%+: {w.get('profit_above_900_percent_num', 0)} | 300-900%: {w.get('profit_300_900_percent_num', 0)}"
+        keyboard = [[
+            InlineKeyboardButton("Track", callback_data=f"track|{chain}|{addr}"),
+            InlineKeyboardButton("Copy Trade (10U)", callback_data=f"copy|{addr}|10")
+        ]]
+        await msg.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
-async def cmd_track(u, ctx):
+async def cmd_track(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
     sys.path.insert(0, AVENUE_SCRIPTS); from ave.http import api_get
     if not ctx.args: await u.message.reply_text("Usage: /track ADDRESS [chain]"); return
     addr = ctx.args[0]; chain = "bsc"
     if len(ctx.args) > 1 and ctx.args[1].lower() in ("bsc", "eth", "solana"): chain = ctx.args[1].lower()
-    await u.message.reply_text("Tracking " + addr[:10] + "... on " + chain.upper())
+    await u.message.reply_text(f"Tracking {addr[:10]}... on {chain.upper()}")
     r = await api_get("/address/walletinfo/tokens", {"wallet_address": addr, "chain": chain, "sort": "balance_usd", "sort_dir": "desc", "pageSize": 8})
     d = r.json()
-    lines = ["Wallet: " + addr[:20] + "... | " + chain.upper() + "\n"]
+    lines = [f"Wallet: `{addr}` | {chain.upper()}\n"]
     if d.get("status") == 1 and d.get("data"):
         for t in d["data"][:6]:
             bal = float(t.get("balance_amount", 0) or 0)
             if bal <= 0: continue
-            lines.append(t.get("symbol", "?") + ": " + str(round(bal, 4)) + " | P/L: " + str(round(float(t.get("profit_pct", 0), 1))) + "%")
+            lines.append(f"{t.get('symbol', '?')}: {bal:.4f} | P/L: {t.get('profit_pct', 0):.1f}%")
     else: lines.append("No holdings found")
     await u.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
-async def cmd_help(u, ctx): await u.message.reply_text(
-    "/register /deposit /balance /quote SYM [AMT] /signal /trade SYM AMT /topwallets [chain] /track ADDRESS /help\n\n"
-    "ENV Status:\n"
-    f"TELEGRAM_BOT_TOKEN: {'✅ set' if BOT_TOKEN else '❌ missing'}\n"
-    f"AVE_API_KEY: {'✅ set' if AVE_API_KEY else '❌ missing'}\n"
-    f"AVE_SECRET_KEY: {'✅ set' if AVE_SECRET_KEY else '❌ missing'}\n"
-    f"API_PLAN: {API_PLAN or 'pro'}\n\n"
-    "Powered by Ave Cloud API",
-    parse_mode="Markdown"
-)
-
-async def cmd_quote(u, ctx):
-    """Quote price for a token - shows estimated output for a given input amount"""
-    if not ctx.args:
-        await u.message.reply_text("Usage: /quote SYMBOL [AMOUNT]\nExample: /quote ASTER 10\nShows quote for converting 10 USDT to ASTER")
+async def cmd_alert(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if len(ctx.args) < 2:
+        await u.message.reply_text("Usage: /alert SYMBOL TARGET_PRICE\nExample: /alert BNB 600")
         return
-
     sym = ctx.args[0].upper()
-    amount = float(ctx.args[1]) if len(ctx.args) > 1 else 10.0  # default 10 USDT
+    try:
+        price = float(ctx.args[1])
+    except ValueError:
+        await u.message.reply_text("Invalid price.")
+        return
+        
+    users = load_users()
+    uid = str(u.effective_user.id)
+    if uid not in users:
+        await u.message.reply_text("Use /register first")
+        return
+        
+    alerts = users[uid].get("alerts", [])
+    alerts.append({"sym": sym, "target": price, "chain": "bsc"})
+    users[uid]["alerts"] = alerts
+    save_users(users)
+    
+    await u.message.reply_text(f"✅ Alert set! You will be notified when {sym} is near ${price}.")
 
+async def cmd_copy(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if len(ctx.args) < 2:
+        await u.message.reply_text("Usage: /copy ADDRESS AMOUNT\nExample: /copy 0x123... 10")
+        return
+    addr = ctx.args[0]
+    try:
+        amt = float(ctx.args[1])
+    except ValueError:
+        await u.message.reply_text("Invalid amount.")
+        return
+        
+    users = load_users()
+    uid = str(u.effective_user.id)
+    if uid not in users or not users[uid].get("assets_id"):
+        await u.message.reply_text("Use /register first")
+        return
+        
+    users[uid]["copy_target"] = {"address": addr.lower(), "amount": amt, "last_tx": ""}
+    save_users(users)
+    
+    await u.message.reply_text(f"✅ Copy trading activated!\nWatching: `{addr}`\nAmount: {amt} USDT per trade", parse_mode="Markdown")
+
+async def cmd_quote(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not ctx.args:
+        await u.message.reply_text("Usage: /quote SYMBOL [AMOUNT]\nExample: /quote ASTER 10")
+        return
+    sym = ctx.args[0].upper()
+    amount = float(ctx.args[1]) if len(ctx.args) > 1 else 10.0
     await u.message.reply_text(f"Getting quote for {amount} USDT → {sym}...")
-
-    # Find token address
     sys.path.insert(0, AVENUE_SCRIPTS)
     from ave.http import api_get
-
     sr = await api_get("/tokens", {"keyword": sym, "limit": 5, "chain": "bsc"})
     tok_data = sr.json().get("data", [])
     if not tok_data:
-        # Try ETH chain
-        sr = await api_get("/tokens", {"keyword": sym, "limit": 5, "chain": "eth"})
-        tok_data = sr.json().get("data", [])
-
-    if not tok_data:
-        await u.message.reply_text(f"Token '{sym}' not found on BSC or ETH.")
+        await u.message.reply_text(f"Token '{sym}' not found on BSC.")
         return
-
-    # Find token with matching symbol
-    ta = None
-    tok_chain = "bsc"
-    for t in tok_data:
-        if t.get("symbol", "").upper() == sym.upper():
-            ta = t.get("token", "").split("-")[0]
-            tok_chain = t.get("chain", "bsc")
-            break
-    if not ta:
-        ta = tok_data[0].get("token", "").split("-")[0]
-        tok_chain = tok_data[0].get("chain", "bsc")
-
-    # USDT address on BSC
+    ta = tok_data[0].get("token", "").split("-")[0]
+    tok_chain = tok_data[0].get("chain", "bsc")
     usdt_addr = "0x55d398326f99059fF775485246999027B3197955"
-    # USDT on ETH
-    usdt_addr_eth = "0xdAC17F958D2ee523a2206206994597C13D831ec7"
-
-    in_token = usdt_addr_eth if tok_chain == "eth" else usdt_addr
-    chain = tok_chain
-
-    # Get quote - inAmount in smallest unit (USDT has 6 decimals for BSC-USDT, 6 for ETH too)
-    in_amount_smallest = str(int(amount * 1e6))  # 6 decimals for USDT
-
+    in_amount_smallest = str(int(amount * 1e6))
     try:
         qr = proxy_post("/v1/thirdParty/chainWallet/getAmountOut", {
-            "chain": chain,
-            "inAmount": in_amount_smallest,
-            "inTokenAddress": in_token,
-            "outTokenAddress": ta,
-            "swapType": "buy"
+            "chain": tok_chain, "inAmount": in_amount_smallest, "inTokenAddress": usdt_addr,
+            "outTokenAddress": ta, "swapType": "buy"
         })
     except Exception as e:
         await u.message.reply_text(f"Quote request failed: {e}")
         return
-
     if qr.get("status") not in (200, 0) or not qr.get("data"):
         await u.message.reply_text(f"Quote failed: {qr.get('msg', 'Unknown error')}")
         return
-
     d = qr["data"]
     estimate_out = int(d.get("estimateOut", 0))
     decimals = d.get("decimals", 18)
-    spender = d.get("spender", "N/A")
-
-    # Convert to human readable
     token_amount = estimate_out / (10 ** decimals)
     price_usd = amount / token_amount if token_amount > 0 else 0
-
     lines = [
         f"💱 Quote: {amount} USDT → {sym}",
-        f"Chain: {chain.upper()}",
-        f"Estimated {sym} out: {token_amount:,.6f}",
-        f"Price: ${price_usd:,.6f} per {sym}",
-        f"Token: `{ta}`",
-        f"Spender: `{spender[:20]}...`" if len(spender) > 20 else f"Spender: `{spender}`",
-        "",
-        f"Link: https://pro.ave.ai/token/{ta}-{chain}"
+        f"Estimated out: {token_amount:,.6f}",
+        f"Price: ${price_usd:,.6f}",
+        f"Token: `{ta}`"
     ]
     await u.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
+async def handle_callback(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = u.callback_query
+    await query.answer()
+    data = query.data.split("|")
+    
+    if data[0] == "cmd":
+        cmd = data[1]
+        if cmd == "pnl": await cmd_pnl(u, ctx)
+        elif cmd == "signal": await cmd_signal(u, ctx)
+        elif cmd == "topwallets": await cmd_topwallets(u, ctx)
+        elif cmd == "deposit": await cmd_deposit(u, ctx)
+        
+    elif data[0] == "buy":
+        chain = data[1]; ta = data[2]; amount = float(data[3])
+        users = load_users()
+        uid = str(query.from_user.id)
+        if uid not in users or not users[uid].get("assets_id"):
+            await query.message.reply_text("Use /register first")
+            return
+        aid = users[uid]["assets_id"]
+        usdt = "0x55d398326f99059fF775485246999027B3197955"
+        await query.message.reply_text(f"Executing quick buy for {amount} USDT...")
+        qr = proxy_post("/v1/thirdParty/tx/sendSwapOrder", {
+            "chain": "bsc", "assetsId": aid, "inTokenAddress": usdt, 
+            "outTokenAddress": ta, "inAmount": str(int(amount * 1e6)), 
+            "swapType": "buy", "slippage": "500"
+        })
+        if qr.get("status") not in (200, 0):
+            await query.message.reply_text("Swap failed: " + str(qr.get("msg", "")))
+            return
+        oid = ""
+        d = qr.get("data", {})
+        if isinstance(d, dict): oid = d.get("id", "")
+        elif isinstance(d, list) and d: oid = d[0].get("id", "") if isinstance(d[0], dict) else str(d[0])
+        await query.message.reply_text(f"Swap submitted! Order ID: {oid}", parse_mode="Markdown")
+
+    elif data[0] == "track":
+        chain = data[1]; addr = data[2]
+        sys.path.insert(0, AVENUE_SCRIPTS); from ave.http import api_get
+        await query.message.reply_text(f"Tracking {addr[:10]}... on {chain.upper()}")
+        r = await api_get("/address/walletinfo/tokens", {"wallet_address": addr, "chain": chain, "sort": "balance_usd", "sort_dir": "desc", "pageSize": 8})
+        d = r.json()
+        lines = [f"Wallet: `{addr}` | {chain.upper()}\n"]
+        if d.get("status") == 1 and d.get("data"):
+            for t in d["data"][:6]:
+                bal = float(t.get("balance_amount", 0) or 0)
+                if bal <= 0: continue
+                lines.append(f"{t.get('symbol', '?')}: {bal:.4f} | P/L: {t.get('profit_pct', 0):.1f}%")
+        else: lines.append("No holdings found")
+        await query.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+    elif data[0] == "copy":
+        addr = data[1]; amt = float(data[2])
+        users = load_users()
+        uid = str(query.from_user.id)
+        if uid not in users or not users[uid].get("assets_id"):
+            await query.message.reply_text("Use /register first")
+            return
+        users[uid]["copy_target"] = {"address": addr.lower(), "amount": amt, "last_tx": ""}
+        save_users(users)
+        await query.message.reply_text(f"✅ Copy trading activated!\nWatching: `{addr}`\nAmount: {amt} USDT per trade", parse_mode="Markdown")
+
+
+async def background_tasks(context: ContextTypes.DEFAULT_TYPE):
+    users = load_users()
+    if not users: return
+    sys.path.insert(0, AVENUE_SCRIPTS)
+    from ave.http import api_get
+    
+    # Poll Copy Trades
+    for uid, data in users.items():
+        ct = data.get("copy_target")
+        if not ct: continue
+        addr = ct["address"]; amt = ct["amount"]; last_tx = ct.get("last_tx", "")
+        aid = data.get("assets_id")
+        if not aid: continue
+        try:
+            r = await api_get("/address/tx", {"wallet_address": addr, "chain": "bsc", "limit": 5})
+            d = r.json()
+            if d.get("status") != 1 or not d.get("data"): continue
+            latest_tx = d["data"][0]
+            tx_hash = latest_tx.get("tx_hash")
+            if tx_hash == last_tx: continue
+            if not last_tx:
+                users[uid]["copy_target"]["last_tx"] = tx_hash
+                save_users(users); continue
+            
+            direction = latest_tx.get("direction")
+            if direction == 1: # Buy
+                token_address = latest_tx.get("token")
+                token_sym = latest_tx.get("symbol", "Unknown")
+                token_addr = token_address.split("-")[0] if "-" in token_address else token_address
+                usdt = "0x55d398326f99059fF775485246999027B3197955"
+                await context.bot.send_message(chat_id=uid, text=f"🚨 *Copy Trade Triggered!*\nTarget bought {token_sym}.\nExecuting buy for {amt} USDT...", parse_mode="Markdown")
+                qr = proxy_post("/v1/thirdParty/tx/sendSwapOrder", {
+                    "chain": "bsc", "assetsId": aid, "inTokenAddress": usdt, 
+                    "outTokenAddress": token_addr, "inAmount": str(int(amt * 1e6)), 
+                    "swapType": "buy", "slippage": "1000"
+                })
+                if qr.get("status") in (200, 0):
+                    await context.bot.send_message(chat_id=uid, text=f"✅ Copy Trade Submitted for {token_sym}!")
+                else:
+                    await context.bot.send_message(chat_id=uid, text=f"❌ Copy Trade Failed: {qr.get('msg')}")
+            
+            users[uid]["copy_target"]["last_tx"] = tx_hash
+            save_users(users)
+        except Exception as e: pass
+
+    # Poll Alerts
+    symbols = set()
+    for u, data in users.items():
+        for alert in data.get("alerts", []):
+            symbols.add(alert["sym"])
+    if not symbols: return
+    
+    for sym in symbols:
+        try:
+            sr = await api_get("/tokens", {"keyword": sym, "limit": 1, "chain": "bsc"})
+            tok_data = sr.json().get("data", [])
+            if not tok_data: continue
+            token_id = tok_data[0].get("token")
+            pr = await api_get(f"/tokens/{token_id}")
+            pd = pr.json().get("data", {}).get("token", {})
+            curr_price = float(pd.get("current_price_usd") or 0)
+            if curr_price == 0: continue
+            
+            for uid, data in users.items():
+                alerts = data.get("alerts", [])
+                new_alerts = []
+                for alert in alerts:
+                    if alert["sym"] == sym:
+                        target = alert["target"]
+                        if abs(curr_price - target) / target < 0.05: # 5% margin
+                            await context.bot.send_message(chat_id=uid, text=f"🚨 *PRICE ALERT* 🚨\n\n{sym} has reached near your target of ${target}!\nCurrent Price: ${curr_price:.4f}", parse_mode="Markdown")
+                        else:
+                            new_alerts.append(alert)
+                    else:
+                        new_alerts.append(alert)
+                if len(alerts) != len(new_alerts):
+                    users[uid]["alerts"] = new_alerts
+                    save_users(users)
+        except Exception as e: pass
 
 def main():
     if not BOT_TOKEN: print("ERROR: TELEGRAM_BOT_TOKEN not set"); return
     app = Application.builder().token(BOT_TOKEN).build()
     for cmd, fn in [
         ("start", cmd_start), ("register", cmd_register), ("deposit", cmd_deposit),
-        ("balance", cmd_balance), ("quote", cmd_quote), ("signal", cmd_signal),
-        ("trade", cmd_trade), ("topwallets", cmd_topwallets), ("track", cmd_track),
-        ("help", cmd_help)
+        ("balance", cmd_balance), ("pnl", cmd_pnl), ("quote", cmd_quote), 
+        ("signal", cmd_signal), ("trade", cmd_trade), ("topwallets", cmd_topwallets), 
+        ("track", cmd_track), ("copy", cmd_copy), ("alert", cmd_alert)
     ]:
         app.add_handler(CommandHandler(cmd, fn))
-    print("Avegram v2 running on proxy wallet mode...")
+        
+    app.add_handler(CallbackQueryHandler(handle_callback))
+    
+    # Background jobs every 60 seconds
+    app.job_queue.run_repeating(background_tasks, interval=60, first=10)
+    
+    print("Avegram v2.1 running on proxy wallet mode with PNL & Copy Trading...")
     app.run_polling()
 
 if __name__ == "__main__": main()
