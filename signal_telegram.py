@@ -1,7 +1,7 @@
 """SignalBot v2 - Ave proxy wallet integration"""
 import os, json, asyncio, sys, urllib.request, urllib.parse, base64, datetime, hmac, hashlib
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 from dotenv import load_dotenv
 
 AVENUE_SCRIPTS = "/home/workspace/ave-cloud-skill/scripts"
@@ -41,94 +41,274 @@ def proxy_post(path, body):
     req = urllib.request.Request("https://bot-api.ave.ai" + path, data=data, headers=proxy_headers("POST", path, body))
     with urllib.request.urlopen(req, timeout=15) as r: return json.loads(r.read())
 
-async def cmd_start(u, ctx):
-    await u.message.reply_text(
-        "SignalBot v2 - Proxy Wallet Bot\n\n"
-        "/register - Create your Ave proxy wallet\n"
-        "/deposit - View deposit address\n"
-        "/balance - Check portfolio\n"
-        "/quote SYMBOL [AMOUNT] - Get price quote\n"
-        "/signal - Scan for signals\n"
-        "/trade SYMBOL AMOUNT - Execute swap\n"
-        "/topwallets - Smart money wallets\n"
-        "/track ADDRESS - Track any wallet\n"
-        "/help - Commands\n\n"
-        "Powered by Ave Cloud API",
-        parse_mode="Markdown"
-    )
+async def show_main_menu(message, uid, edit=False):
+    users = load_users()
+    uid_str = str(uid)
+    text = "🚀 *Avegram Dashboard*\n\nPowered by Ave Cloud API"
+    
+    if uid_str not in users or not users[uid_str].get("assets_id"):
+        keyboard = [[InlineKeyboardButton("💳 Create Wallet", callback_data="cb_register")]]
+    else:
+        keyboard = [
+            [InlineKeyboardButton("📊 My Portfolio", callback_data="cb_balance")],
+            [InlineKeyboardButton("💱 Trade", callback_data="cb_trade"), InlineKeyboardButton("📡 Scan Signals", callback_data="cb_signal")],
+            [InlineKeyboardButton("⬇️ Deposit", callback_data="cb_deposit"), InlineKeyboardButton("⬆️ Withdraw", callback_data="cb_withdraw")],
+            [InlineKeyboardButton("🐋 Smart Money Wallets", callback_data="cb_topwallets")],
+            [InlineKeyboardButton("❓ Help", callback_data="cb_help")]
+        ]
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    if edit:
+        await message.edit_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+    else:
+        await message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
 
-async def cmd_register(u, ctx):
+async def handle_callback(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = u.callback_query
+    await query.answer()
+    data = query.data
+    uid = u.effective_user.id
+
+    if data == "cb_menu":
+        users = load_users()
+        if str(uid) in users and "state" in users[str(uid)]:
+            users[str(uid)]["state"] = None
+            save_users(users)
+        await show_main_menu(query.message, uid, edit=True)
+    elif data == "cb_register":
+        await cmd_register(u, ctx, is_callback=True)
+    elif data == "cb_balance":
+        await cmd_balance(u, ctx, is_callback=True)
+    elif data == "cb_signal":
+        await cmd_signal(u, ctx, is_callback=True)
+    elif data == "cb_topwallets":
+        await cmd_topwallets(u, ctx, is_callback=True)
+    elif data == "cb_help":
+        await cmd_help(u, ctx, is_callback=True)
+    elif data == "cb_deposit":
+        await cmd_deposit(u, ctx, is_callback=True)
+    elif data == "cb_withdraw":
+        users = load_users()
+        uid_str = str(uid)
+        users[uid_str]["state"] = "awaiting_withdraw_address"
+        save_users(users)
+        keyboard = [[InlineKeyboardButton("🔙 Cancel", callback_data="cb_menu")]]
+        await query.message.edit_text("💸 *Withdraw Funds*\n\nPlease paste the destination BSC address:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    elif data == "cb_trade":
+        users = load_users()
+        uid_str = str(uid)
+        users[uid_str]["state"] = "awaiting_trade_input"
+        save_users(users)
+        keyboard = [[InlineKeyboardButton("🔙 Cancel", callback_data="cb_menu")]]
+        await query.message.edit_text("💱 *Trade Token*\n\nPlease enter the SYMBOL and AMOUNT separated by space.\nExample: `PEPE 10` (to buy $10 worth of PEPE)", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+
+async def handle_text(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = str(u.effective_user.id)
+    users = load_users()
+    if uid not in users or "state" not in users[uid]:
+        return
+        
+    state = users[uid]["state"]
+    text = u.message.text.strip()
+    kb = [[InlineKeyboardButton("🔙 Back to Menu", callback_data="cb_menu")]]
+    rm = InlineKeyboardMarkup(kb)
+    
+    if state == "awaiting_withdraw_address":
+        users[uid]["withdraw_address"] = text
+        users[uid]["state"] = "awaiting_withdraw_amount"
+        save_users(users)
+        await u.message.reply_text(f"Address `{text}` saved.\n\nNow enter the amount of USDT to withdraw:", reply_markup=rm, parse_mode="Markdown")
+        
+    elif state == "awaiting_withdraw_amount":
+        users[uid]["state"] = None
+        save_users(users)
+        try:
+            amount = float(text)
+            # Placeholder for actual withdraw logic
+            await u.message.reply_text(f"✅ Withdrawal of {amount} USDT to `{users[uid]['withdraw_address']}` initiated! (Mock)", reply_markup=rm, parse_mode="Markdown")
+        except ValueError:
+            await u.message.reply_text("Invalid amount. Please try again from the menu.", reply_markup=rm)
+            
+    elif state == "awaiting_trade_input":
+        users[uid]["state"] = None
+        save_users(users)
+        parts = text.split()
+        if len(parts) != 2:
+            await u.message.reply_text("Invalid format. Use SYMBOL AMOUNT (e.g. PEPE 10). Try again from the menu.", reply_markup=rm)
+            return
+        
+        # We can simulate the context args to call cmd_trade
+        class MockCtx:
+            def __init__(self, args):
+                self.args = args
+        await cmd_trade(u, MockCtx(parts), is_callback=False)
+
+async def cmd_start(u, ctx):
+    await show_main_menu(u.message, u.effective_user.id)
+
+async def cmd_register(u, ctx, is_callback=False):
     users = load_users()
     uid = str(u.effective_user.id)
+    msg = u.callback_query.message if is_callback else u.message
+    kb = [[InlineKeyboardButton("🔙 Back to Menu", callback_data="cb_menu")]]
+    rm = InlineKeyboardMarkup(kb)
+    
     # If already registered with proxy wallet, show it
     if uid in users and users[uid].get("assets_id"):
         w = users[uid]
         bsc_addr = next((a["address"] for a in w.get("address_list", []) if a["chain"] == "bsc"), "N/A")
-        await u.message.reply_text(f"Already registered\nBSC: `{bsc_addr}`", parse_mode="Markdown")
+        text = f"Already registered\nBSC: `{bsc_addr}`"
+        if is_callback: await msg.edit_text(text, reply_markup=rm, parse_mode="Markdown")
+        else: await msg.reply_text(text, reply_markup=rm, parse_mode="Markdown")
         return
+    
     # If user exists but has no proxy wallet yet, fetch existing wallets from API
-    # and attach the first one (avegram_test or user1 from your account)
     if uid in users and not users[uid].get("assets_id"):
         r = proxy_get("/v1/thirdParty/user/getUserByAssetsId")
         if r.get("status") == 200 and r.get("data"):
             wallets = r["data"]
             if wallets:
-                w = wallets[0]  # use first wallet (avegram_test)
+                w = wallets[0]
                 users[uid]["assets_id"] = w["assetsId"]
                 users[uid]["address_list"] = w.get("addressList", [])
                 save_users(users)
                 bsc_addr = next((a["address"] for a in w.get("addressList", []) if a["chain"] == "bsc"), "N/A")
-                await u.message.reply_text(f"Proxy wallet found and linked!\n\nBSC: `{bsc_addr}`\n\nThis wallet has your funded USDT. Check /balance to see your holdings.", parse_mode="Markdown")
+                text = f"Proxy wallet found and linked!\n\nBSC: `{bsc_addr}`\n\nThis wallet has your funded USDT. Check Portfolio to see your holdings."
+                if is_callback: await msg.edit_text(text, reply_markup=rm, parse_mode="Markdown")
+                else: await msg.reply_text(text, reply_markup=rm, parse_mode="Markdown")
                 return
-        await u.message.reply_text("No existing wallet found. Creating new one...")
+        if not is_callback: await msg.reply_text("No existing wallet found. Creating new one...")
+    
     # New user - create proxy wallet
     r = proxy_post("/v1/thirdParty/user/generateWallet", {"assetsName": "user_" + uid[-8:], "returnMnemonic": False})
     if r.get("status") not in (200, 0) or not r.get("data"):
-        await u.message.reply_text("Registration failed: " + str(r.get("msg", ""))); return
+        text = "Registration failed: " + str(r.get("msg", ""))
+        if is_callback: await msg.edit_text(text, reply_markup=rm)
+        else: await msg.reply_text(text, reply_markup=rm)
+        return
     d = r["data"]
     users[uid] = {"assets_id": d["assetsId"], "address_list": d.get("addressList", []), "username": u.effective_user.username, "chain": "bsc"}
     save_users(users)
     bsc_addr = next((a["address"] for a in d.get("addressList", []) if a["chain"] == "bsc"), "N/A")
-    await u.message.reply_text(f"Proxy wallet created!\n\nBSC: `{bsc_addr}`\n\nDeposit USDT BEP20 to this address, then /balance to check.", parse_mode="Markdown")
+    text = f"Proxy wallet created!\n\nBSC: `{bsc_addr}`\n\nDeposit USDT BEP20 to this address, then check Portfolio."
+    if is_callback: await msg.edit_text(text, reply_markup=rm, parse_mode="Markdown")
+    else: await msg.reply_text(text, reply_markup=rm, parse_mode="Markdown")
 
-async def cmd_deposit(u, ctx):
-    users = load_users(); uid = str(u.effective_user.id)
+async def cmd_deposit(u, ctx, is_callback=False):
+    users = load_users()
+    uid = str(u.effective_user.id)
+    msg = u.callback_query.message if is_callback else u.message
+    kb = [[InlineKeyboardButton("🔙 Back to Menu", callback_data="cb_menu")]]
+    rm = InlineKeyboardMarkup(kb)
+    
     if uid not in users or not users[uid].get("assets_id"):
-        await u.message.reply_text("Use /register first"); return
+        text = "Use /register first"
+        if is_callback: await msg.edit_text(text, reply_markup=rm)
+        else: await msg.reply_text(text, reply_markup=rm)
+        return
     addr = next((a["address"] for a in users[uid].get("address_list", []) if a["chain"] == "bsc"), "N/A")
-    await u.message.reply_text(
-        "Deposit Address (BSC BEP20)\n\n" + addr + "\n\nDeposit USDT to this address",
-        parse_mode="Markdown"
-    )
+    text = "Deposit Address (BSC BEP20)\n\n`" + addr + "`\n\nDeposit USDT to this address"
+    if is_callback: await msg.edit_text(text, reply_markup=rm, parse_mode="Markdown")
+    else: await msg.reply_text(text, reply_markup=rm, parse_mode="Markdown")
 
-async def cmd_balance(u, ctx):
-    users = load_users(); uid = str(u.effective_user.id)
+async def cmd_balance(u, ctx, is_callback=False):
+    users = load_users()
+    uid = str(u.effective_user.id)
+    msg = u.callback_query.message if is_callback else u.message
+    kb = [
+        [InlineKeyboardButton("🔄 Refresh", callback_data="cb_balance")],
+        [InlineKeyboardButton("🔙 Back to Menu", callback_data="cb_menu")]
+    ]
+    rm = InlineKeyboardMarkup(kb)
+    
     if uid not in users or not users[uid].get("assets_id"):
-        await u.message.reply_text("Use /register first"); return
-    await u.message.reply_text("Fetching portfolio...")
+        text = "Use /register first"
+        if is_callback: await msg.edit_text(text, reply_markup=rm)
+        else: await msg.reply_text(text, reply_markup=rm)
+        return
+        
+    text_loading = "Fetching portfolio and PNL..."
+    if is_callback: await msg.edit_text(text_loading)
+    else: msg = await msg.reply_text(text_loading)
+    
     aid = users[uid]["assets_id"]
     r = proxy_get("/v1/thirdParty/tx/getSwapOrder", {"chain": "bsc", "assetsId": aid, "pageSize": "50", "pageNO": "0"})
     if r.get("status") not in (200, 0) or not r.get("data"):
-        await u.message.reply_text("No swap history. Deposit USDT to your BSC wallet address then try /balance again."); return
-    lines = ["Portfolio - BSC\n"]
-    total_usd = 0.0
-    seen = {}
+        await msg.edit_text("No swap history. Deposit USDT to your BSC wallet address to start trading.", reply_markup=rm)
+        return
+        
+    # Aggregate positions
+    positions = {}
     for o in r["data"]:
         if o.get("status") != "confirmed": continue
-        sym = o.get("outTokenSymbol", "?")
-        if sym in seen: continue
-        seen[sym] = True
-        bal = float(o.get("outAmount", "0")) / 1e18
-        price = float(o.get("txPriceUsd", "0"))
-        usd = bal * price
-        total_usd += usd
-        lines.append(sym + ": " + str(round(bal, 4)) + " ($" + str(round(usd, 2)) + ")")
-    if len(lines) == 1: await u.message.reply_text("No confirmed swaps yet."); return
-    lines.append("\nTotal: $" + str(round(total_usd, 2)))
-    await u.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        swap_type = o.get("swapType", "buy")
+        if swap_type == "buy":
+            sym = o.get("outTokenSymbol", "?")
+            ta = o.get("outTokenAddress")
+            bal_chg = float(o.get("outAmount", "0")) / 1e18
+            usd_spent = float(o.get("txPriceUsd", "0")) * bal_chg
+            if sym not in positions: positions[sym] = {"addr": ta, "bal": 0.0, "invested": 0.0}
+            positions[sym]["bal"] += bal_chg
+            positions[sym]["invested"] += usd_spent
+        else:
+            sym = o.get("inTokenSymbol", "?")
+            ta = o.get("inTokenAddress")
+            bal_chg = float(o.get("inAmount", "0")) / 1e18
+            usd_received = float(o.get("txPriceUsd", "0")) * bal_chg
+            if sym in positions:
+                positions[sym]["bal"] -= bal_chg
+                positions[sym]["invested"] -= usd_received
+                if positions[sym]["invested"] < 0: positions[sym]["invested"] = 0
+                
+    sys.path.insert(0, AVENUE_SCRIPTS); from ave.http import api_get
+    
+    lines = ["📊 *Portfolio & PNL - BSC*\n"]
+    total_invested = 0.0
+    total_current = 0.0
+    
+    for sym, p in positions.items():
+        if p["bal"] < 0.0001: continue
+        total_invested += p["invested"]
+        
+        pr = await api_get(f"/tokens/{p['addr']}-bsc")
+        curr_price = 0.0
+        if pr.status_code == 200 and pr.json().get("data"):
+            curr_price = float(pr.json()["data"].get("token", {}).get("current_price_usd", 0))
+            
+        curr_value = p["bal"] * curr_price
+        total_current += curr_value
+        
+        pnl_usd = curr_value - p["invested"]
+        pnl_pct = (pnl_usd / p["invested"] * 100) if p["invested"] > 0 else 0
+        sign = "🟢 +" if pnl_usd >= 0 else "🔴 "
+        
+        lines.append(f"*{sym}*: {round(p['bal'], 4)}")
+        lines.append(f"  Val: ${curr_value:.2f} | Inv: ${p['invested']:.2f}")
+        lines.append(f"  PNL: {sign}${abs(pnl_usd):.2f} ({pnl_pct:+.2f}%)")
+        lines.append("")
+        
+    if total_invested == 0 and total_current == 0:
+        await msg.edit_text("No active positions.", reply_markup=rm)
+        return
+        
+    tot_pnl_usd = total_current - total_invested
+    tot_pnl_pct = (tot_pnl_usd / total_invested * 100) if total_invested > 0 else 0
+    tot_sign = "🟢 +" if tot_pnl_usd >= 0 else "🔴 "
+    
+    lines.append(f"💰 *Total Value*: ${total_current:.2f}")
+    lines.append(f"📈 *Total PNL*: {tot_sign}${abs(tot_pnl_usd):.2f} ({tot_pnl_pct:+.2f}%)")
+    
+    await msg.edit_text("\n".join(lines), reply_markup=rm, parse_mode="Markdown")
 
-async def cmd_signal(u, ctx):
-    await u.message.reply_text("Scanning for signals (60%+ confidence)...", parse_mode="")
+async def cmd_signal(u, ctx, is_callback=False):
+    msg = u.callback_query.message if is_callback else u.message
+    kb = [[InlineKeyboardButton("🔙 Back to Menu", callback_data="cb_menu")]]
+    rm = InlineKeyboardMarkup(kb)
+    
+    text_loading = "Scanning for signals (60%+ confidence)..."
+    if is_callback: await msg.edit_text(text_loading)
+    else: msg = await msg.reply_text(text_loading)
+    
     tokens = []
     seen = set()
     # 1. Public signals (Ave-filtered, multi-chain)
@@ -156,7 +336,8 @@ async def cmd_signal(u, ctx):
                 if a and a not in seen: seen.add(a); tokens.append({"addr": a, "chain": "bsc", "sym": t.get("symbol", "?"), "name": t.get("name", "")})
         except: pass
     if not tokens:
-        await u.message.reply_text("No tokens found to scan."); return
+        await msg.edit_text("No tokens found to scan.", reply_markup=rm)
+        return
     signals = []
     for tok in tokens[:25]:
         try:
@@ -184,51 +365,87 @@ async def cmd_signal(u, ctx):
         except: continue
     signals.sort(key=lambda x: x["conf"], reverse=True)
     if not signals:
-        await u.message.reply_text("No signals above 60% confidence right now. Try again later.")
+        await msg.edit_text("No signals above 60% confidence right now. Try again later.", reply_markup=rm)
         return
     lines = [f"🔔 {len(signals)} Signals Found (≥60% confidence)\n"]
     for s in signals[:8]:
         d = "🟢 BUY" if s["chg"] < -3 else "🔴 SELL" if s["chg"] > 5 else "🟡 WATCH"
         lines.append(f"{d} [{s['conf']}%] {s['sym']} | ${round(s['price'], 8)} | 24h:{round(s['chg'],1)}% | Liq:${s['liq']:,.0f}")
-    lines.append("\n/trade <sym> <amt> to execute")
-    await u.message.reply_text("\n".join(lines))
+    lines.append("\n`/trade <sym> <amt>` to execute")
+    await msg.edit_text("\n".join(lines), reply_markup=rm, parse_mode="Markdown")
 
-async def cmd_trade(u, ctx):
-    users = load_users(); uid = str(u.effective_user.id)
-    if uid not in users or not users[uid].get("assets_id"): await u.message.reply_text("Use /register first"); return
-    if not ctx.args or len(ctx.args) < 2: await u.message.reply_text("Usage: /trade SYMBOL AMOUNT"); return
-    sym = ctx.args[0].upper(); amount = float(ctx.args[1])
+async def cmd_trade(u, ctx, is_callback=False):
+    users = load_users()
+    uid = str(u.effective_user.id)
+    msg = u.callback_query.message if is_callback else u.message
+    kb = [[InlineKeyboardButton("🔙 Back to Menu", callback_data="cb_menu")]]
+    rm = InlineKeyboardMarkup(kb)
+    
+    if uid not in users or not users[uid].get("assets_id"):
+        text = "Use /register first"
+        if is_callback: await msg.edit_text(text, reply_markup=rm)
+        else: await msg.reply_text(text, reply_markup=rm)
+        return
+        
+    if not ctx.args or len(ctx.args) < 2:
+        text = "Usage: `/trade SYMBOL AMOUNT`\n\nExample: `/trade ASTER 10`\n(Interactive trade UI coming soon)"
+        if is_callback: await msg.edit_text(text, reply_markup=rm, parse_mode="Markdown")
+        else: await msg.reply_text(text, reply_markup=rm, parse_mode="Markdown")
+        return
+        
+    sym = ctx.args[0].upper()
+    amount = float(ctx.args[1])
     sys.path.insert(0, AVENUE_SCRIPTS); from ave.http import api_get
+    
+    if is_callback: await msg.edit_text(f"Looking up {sym}...")
+    else: msg = await msg.reply_text(f"Looking up {sym}...")
+    
     sr = await api_get("/tokens", {"keyword": sym, "limit": 3, "chain": "bsc"})
     tok_data = sr.json().get("data", [])
-    if not tok_data: await u.message.reply_text("Token " + sym + " not found"); return
+    if not tok_data:
+        await msg.edit_text("Token " + sym + " not found", reply_markup=rm)
+        return
+        
     ta = tok_data[0].get("token", "").split("-")[0]
     aid = users[uid]["assets_id"]
     usdt = "0x55d398326f99059fF775485246999027B3197955"
-    await u.message.reply_text("Getting quote for " + str(amount) + " USDT to " + sym + "...")
+    await msg.edit_text("Getting quote for " + str(amount) + " USDT to " + sym + "...")
+    
     qr = proxy_post("/v1/thirdParty/tx/sendSwapOrder", {"chain": "bsc", "assetsId": aid, "inTokenAddress": usdt, "outTokenAddress": ta, "inAmount": str(int(amount * 1e6)), "swapType": "buy", "slippage": "500"})
     if qr.get("status") not in (200, 0):
-        await u.message.reply_text("Swap failed: " + str(qr.get("msg", ""))); return
+        await msg.edit_text("Swap failed: " + str(qr.get("msg", "")), reply_markup=rm)
+        return
+        
     oid = ""
     d = qr.get("data", {})
     if isinstance(d, dict): oid = d.get("id", "")
     elif isinstance(d, list) and d: oid = d[0].get("id", "") if isinstance(d[0], dict) else str(d[0])
-    await u.message.reply_text("Swap submitted!\nOrder ID: " + oid + "\n\nCheck /balance after 30s for confirmation.", parse_mode="Markdown")
+    
+    await msg.edit_text("✅ Swap submitted!\nOrder ID: `" + oid + "`\n\nCheck Portfolio after 30s for confirmation.", reply_markup=rm, parse_mode="Markdown")
 
-async def cmd_topwallets(u, ctx):
+async def cmd_topwallets(u, ctx, is_callback=False):
+    msg = u.callback_query.message if is_callback else u.message
+    kb = [[InlineKeyboardButton("🔙 Back to Menu", callback_data="cb_menu")]]
+    rm = InlineKeyboardMarkup(kb)
     sys.path.insert(0, AVENUE_SCRIPTS); from ave.http import api_get
     chain = "bsc"
     if ctx.args and ctx.args[0].lower() in ("bsc", "eth", "base", "solana"): chain = ctx.args[0].lower()
-    await u.message.reply_text("Loading top wallets on " + chain.upper() + "...")
+    
+    text_loading = "Loading top wallets on " + chain.upper() + "..."
+    if is_callback: await msg.edit_text(text_loading)
+    else: msg = await msg.reply_text(text_loading)
+    
     r = await api_get("/address/smart_wallet/list", {"chain": chain, "sort": "profit_above_900_percent_num", "sort_dir": "desc", "profit_900_percent_num_min": 1, "profit_300_900_percent_num_min": 3})
     d = r.json()
-    if d.get("status") != 1 or not d.get("data"): await u.message.reply_text("No wallets found on " + chain.upper()); return
+    if d.get("status") != 1 or not d.get("data"):
+        await msg.edit_text("No wallets found on " + chain.upper(), reply_markup=rm)
+        return
     lines = ["Top Smart Money Wallets - " + chain.upper() + "\n"]
     for i, w in enumerate(d["data"][:8], 1):
         addr = w.get("wallet_address", "")[:10] + "..."
         lines.append(str(i) + ". " + addr + " | 900%+: " + str(w.get("profit_above_900_percent_num", 0)) + " | 300-900%: " + str(w.get("profit_300_900_percent_num", 0)))
-        lines.append("   /track " + w.get("wallet_address", ""))
-    await u.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        lines.append("   `/track " + w.get("wallet_address", "") + "`")
+    await msg.edit_text("\n".join(lines), reply_markup=rm, parse_mode="Markdown")
 
 async def cmd_track(u, ctx):
     sys.path.insert(0, AVENUE_SCRIPTS); from ave.http import api_get
@@ -247,16 +464,21 @@ async def cmd_track(u, ctx):
     else: lines.append("No holdings found")
     await u.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
-async def cmd_help(u, ctx): await u.message.reply_text(
-    "/register /deposit /balance /quote SYM [AMT] /signal /trade SYM AMT /topwallets [chain] /track ADDRESS /help\n\n"
-    "ENV Status:\n"
-    f"TELEGRAM_BOT_TOKEN: {'✅ set' if BOT_TOKEN else '❌ missing'}\n"
-    f"AVE_API_KEY: {'✅ set' if AVE_API_KEY else '❌ missing'}\n"
-    f"AVE_SECRET_KEY: {'✅ set' if AVE_SECRET_KEY else '❌ missing'}\n"
-    f"API_PLAN: {API_PLAN or 'pro'}\n\n"
-    "Powered by Ave Cloud API",
-    parse_mode="Markdown"
-)
+async def cmd_help(u, ctx, is_callback=False):
+    msg = u.callback_query.message if is_callback else u.message
+    kb = [[InlineKeyboardButton("🔙 Back to Menu", callback_data="cb_menu")]]
+    rm = InlineKeyboardMarkup(kb)
+    text = (
+        "/register /deposit /balance /quote SYM [AMT] /signal /trade SYM AMT /topwallets [chain] /track ADDRESS /help\n\n"
+        "ENV Status:\n"
+        f"TELEGRAM_BOT_TOKEN: {'✅ set' if BOT_TOKEN else '❌ missing'}\n"
+        f"AVE_API_KEY: {'✅ set' if AVE_API_KEY else '❌ missing'}\n"
+        f"AVE_SECRET_KEY: {'✅ set' if AVE_SECRET_KEY else '❌ missing'}\n"
+        f"API_PLAN: {API_PLAN or 'pro'}\n\n"
+        "Powered by Ave Cloud API"
+    )
+    if is_callback: await msg.edit_text(text, reply_markup=rm, parse_mode="Markdown")
+    else: await msg.reply_text(text, reply_markup=rm, parse_mode="Markdown")
 
 async def cmd_quote(u, ctx):
     """Quote price for a token - shows estimated output for a given input amount"""
@@ -355,6 +577,10 @@ def main():
         ("help", cmd_help)
     ]:
         app.add_handler(CommandHandler(cmd, fn))
+    
+    app.add_handler(CallbackQueryHandler(handle_callback))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    
     print("Avegram v2 running on proxy wallet mode...")
     app.run_polling()
 
