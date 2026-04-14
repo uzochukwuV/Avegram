@@ -9,13 +9,13 @@ AVENUE_SCRIPTS = "/home/workspace/ave-cloud-skill/scripts"
 if not os.path.exists(AVENUE_SCRIPTS):
     AVENUE_SCRIPTS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ave-cloud-skill", "scripts")
 sys.path.insert(0, AVENUE_SCRIPTS)
-load_dotenv("/home/workspace/Avegram/.env")
+load_dotenv("/workspace/.env")
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 AVE_API_KEY = os.environ.get("AVE_API_KEY", "")
 AVE_SECRET_KEY = os.environ.get("AVE_SECRET_KEY", "")
 API_PLAN = os.environ.get("API_PLAN", "pro")
-USERS_FILE = "/home/workspace/Avegram/users.json"
-TRADES_FILE = "/home/workspace/Avegram/trades.json"
+USERS_FILE = "/workspace/users.json"
+TRADES_FILE = "/workspace/trades.json"
 
 def load_users():
     if os.path.exists(USERS_FILE):
