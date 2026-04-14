@@ -176,6 +176,10 @@ async def handle_text(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
             users[uid]["auto_trade"]["amount"] = amount
             users[uid]["state"] = "awaiting_auto_trade_tp"
             save_users(users)
+            # Ensure auto_trade context exists
+            if "auto_trade" not in users[uid]:
+                await u.message.reply_text("Auto-trade session expired. Please try again from the menu.", reply_markup=rm)
+                return
             sym = users[uid]["auto_trade"]["sym"]
             await u.message.reply_text(f"Amount: ${amount}\n\nEnter Take-Profit % for {sym} (e.g. 50):", reply_markup=rm)
         except ValueError:
@@ -187,6 +191,10 @@ async def handle_text(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
             users[uid]["auto_trade"]["tp_pct"] = tp
             users[uid]["state"] = "awaiting_auto_trade_sl"
             save_users(users)
+            # Ensure auto_trade context exists
+            if "auto_trade" not in users[uid]:
+                await u.message.reply_text("Auto-trade session expired. Please try again from the menu.", reply_markup=rm)
+                return
             sym = users[uid]["auto_trade"]["sym"]
             await u.message.reply_text(f"Take-Profit: +{tp}%\n\nEnter Stop-Loss % for {sym} (e.g. -20):", reply_markup=rm)
         except ValueError:
@@ -199,6 +207,11 @@ async def handle_text(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
             users[uid]["state"] = None
             save_users(users)
             
+            # Ensure auto_trade context exists
+            if "auto_trade" not in users[uid]:
+                await u.message.reply_text("Auto-trade session expired. Please try again from the menu.", reply_markup=rm)
+                return
+                
             auto_cfg = users[uid]["auto_trade"]
             sym = auto_cfg["sym"]
             amount = auto_cfg["amount"]
