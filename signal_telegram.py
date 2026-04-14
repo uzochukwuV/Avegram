@@ -1,5 +1,5 @@
 """SignalBot v2 - Ave proxy wallet integration"""
-import os, json, asyncio, sys
+import os, json, asyncio, sys, urllib.request, urllib.parse, base64, datetime, hmac, hashlib
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
@@ -57,22 +57,36 @@ async def cmd_start(u, ctx):
 async def cmd_register(u, ctx):
     users = load_users()
     uid = str(u.effective_user.id)
+    # If already registered with proxy wallet, show it
     if uid in users and users[uid].get("assets_id"):
         w = users[uid]
         bsc_addr = next((a["address"] for a in w.get("address_list", []) if a["chain"] == "bsc"), "N/A")
-        await u.message.reply_text("Already registered\nBSC: " + bsc_addr, parse_mode="Markdown")
+        await u.message.reply_text(f"Already registered\nBSC: `{bsc_addr}`", parse_mode="Markdown")
         return
-    r = proxy_post("/v1/thirdParty/user/generateWallet", {"assetsName": "user_" + uid, "returnMnemonic": False})
+    # If user exists but has no proxy wallet yet, fetch existing wallets from API
+    # and attach the first one (avegram_test or user1 from your account)
+    if uid in users and not users[uid].get("assets_id"):
+        r = proxy_get("/v1/thirdParty/user/getUserByAssetsId")
+        if r.get("status") == 200 and r.get("data"):
+            wallets = r["data"]
+            if wallets:
+                w = wallets[0]  # use first wallet (avegram_test)
+                users[uid]["assets_id"] = w["assetsId"]
+                users[uid]["address_list"] = w.get("addressList", [])
+                save_users(users)
+                bsc_addr = next((a["address"] for a in w.get("addressList", []) if a["chain"] == "bsc"), "N/A")
+                await u.message.reply_text(f"Proxy wallet found and linked!\n\nBSC: `{bsc_addr}`\n\nThis wallet has your funded USDT. Check /balance to see your holdings.", parse_mode="Markdown")
+                return
+        await u.message.reply_text("No existing wallet found. Creating new one...")
+    # New user - create proxy wallet
+    r = proxy_post("/v1/thirdParty/user/generateWallet", {"assetsName": "user_" + uid[-8:], "returnMnemonic": False})
     if r.get("status") not in (200, 0) or not r.get("data"):
         await u.message.reply_text("Registration failed: " + str(r.get("msg", ""))); return
     d = r["data"]
     users[uid] = {"assets_id": d["assetsId"], "address_list": d.get("addressList", []), "username": u.effective_user.username, "chain": "bsc"}
     save_users(users)
     bsc_addr = next((a["address"] for a in d.get("addressList", []) if a["chain"] == "bsc"), "N/A")
-    await u.message.reply_text(
-        "Wallet created on Ave proxy!\n\nBSC: " + bsc_addr + "\n\nDeposit USDT BEP20 to the BSC address above, then use /balance",
-        parse_mode="Markdown"
-    )
+    await u.message.reply_text(f"Proxy wallet created!\n\nBSC: `{bsc_addr}`\n\nDeposit USDT BEP20 to this address, then /balance to check.", parse_mode="Markdown")
 
 async def cmd_deposit(u, ctx):
     users = load_users(); uid = str(u.effective_user.id)
