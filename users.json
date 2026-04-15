@@ -22,6 +22,54 @@
         "chain": "solana",
         "address": "ELqagACLTjG1vdGJSZpqjKSVXYuVFQ6BjNjas7yTFvwf"
       }
-    ]
+    ],
+    "state": null,
+    "auto_trade": {
+      "chain": "bsc",
+      "sym": "\u5723\u7532\u866b",
+      "price": "0.00018941",
+      "addr_short": "0x3dce34c6",
+      "amount": 5.0,
+      "tp_pct": 90.0,
+      "sl_pct": -30.0
+    }
+  },
+  "7212609303": {
+    "assets_id": "90ead0e7e5644c018325516eeab6f670",
+    "address_list": [
+      {
+        "address": "0x482fde1b624325771785269a81daf03ebcf85cb7",
+        "chain": "bsc"
+      },
+      {
+        "address": "AyB1etN2nzcictzZ2ivhG1EvTZ9GcWfJMvYSCJ2LLcLo",
+        "chain": "solana"
+      }
+    ],
+    "username": "uzochukwu787898",
+    "chain": "bsc"
+  },
+  "6384188249": {
+    "assets_id": "26000f3bc0b340dead07a0cf1625f14e",
+    "address_list": [
+      {
+        "address": "0xb8a4e7d532b342b139d80e49269a5e926a307929",
+        "chain": "bsc"
+      },
+      {
+        "address": "GzSS5Rp7pyW81iiAjJrEhpMPXco4t5V9xAn7GHXkjZbx",
+        "chain": "solana"
+      }
+    ],
+    "username": "Zylynin",
+    "chain": "bsc",
+    "state": "awaiting_auto_trade_tp",
+    "auto_trade": {
+      "chain": "bsc",
+      "sym": "\u9f99\u5934",
+      "price": "0.00034498",
+      "addr_short": "0xf786a61a",
+      "amount": 4.0
+    }
   }
 }
