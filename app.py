@@ -1,5 +1,7 @@
 """SignalBot v2 - Ave proxy wallet integration"""
 import os, json, asyncio, sys, urllib.request, urllib.parse, base64, datetime, hmac, hashlib
+import psycopg2
+import psycopg2.extras
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 from dotenv import load_dotenv
@@ -14,33 +16,222 @@ BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 AVE_API_KEY = os.environ.get("AVE_API_KEY", "")
 AVE_SECRET_KEY = os.environ.get("AVE_SECRET_KEY", "")
 API_PLAN = os.environ.get("API_PLAN", "pro")
-USERS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "users.json")
-TRADES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "trades.json")
-COPY_TRADES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "copy_trades.json")
+DB_URL = os.environ.get("DATABASE_URL") or os.environ.get("POSTGRES_URL") or os.environ.get("PRISMA_DATABASE_URL") or ""
+_DB_CONN = None
+
+def db_conn():
+    global _DB_CONN
+    if not DB_URL:
+        raise RuntimeError("DATABASE_URL not set")
+    if _DB_CONN is None or _DB_CONN.closed:
+        _DB_CONN = psycopg2.connect(DB_URL, connect_timeout=10)
+        _DB_CONN.autocommit = False
+    return _DB_CONN
+
+def db_init():
+    conn = db_conn()
+    with conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                telegram_id TEXT PRIMARY KEY,
+                username TEXT,
+                chain TEXT DEFAULT 'bsc',
+                assets_id TEXT,
+                address_list JSONB,
+                state TEXT,
+                session JSONB,
+                created_at TIMESTAMPTZ DEFAULT now(),
+                updated_at TIMESTAMPTZ DEFAULT now()
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS trades (
+                telegram_id TEXT NOT NULL,
+                token_address TEXT NOT NULL,
+                chain TEXT NOT NULL,
+                symbol TEXT,
+                entry_price NUMERIC,
+                invested_usdt NUMERIC,
+                tp_pct NUMERIC,
+                sl_pct NUMERIC,
+                status TEXT,
+                created_at TIMESTAMPTZ DEFAULT now(),
+                updated_at TIMESTAMPTZ DEFAULT now(),
+                PRIMARY KEY (telegram_id, token_address, chain)
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS copy_trades (
+                telegram_id TEXT NOT NULL,
+                target_wallet TEXT NOT NULL,
+                chain TEXT NOT NULL,
+                pct_allocation NUMERIC,
+                max_usdt_per_trade NUMERIC,
+                last_tx_hash TEXT,
+                status TEXT,
+                created_at TIMESTAMPTZ DEFAULT now(),
+                updated_at TIMESTAMPTZ DEFAULT now(),
+                PRIMARY KEY (telegram_id, target_wallet, chain)
+            )
+        """)
+    conn.commit()
+
+_USER_RESERVED_KEYS = {"username", "chain", "assets_id", "address_list", "state"}
 
 def load_users():
-    if os.path.exists(USERS_FILE):
-        with open(USERS_FILE) as f: return json.load(f)
-    return {}
+    conn = db_conn()
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute("SELECT telegram_id, username, chain, assets_id, address_list, state, session FROM users")
+        rows = cur.fetchall()
+    users = {}
+    for r in rows:
+        uid = r["telegram_id"]
+        d = {
+            "username": r.get("username"),
+            "chain": r.get("chain") or "bsc",
+            "assets_id": r.get("assets_id"),
+            "address_list": r.get("address_list") or [],
+            "state": r.get("state"),
+        }
+        sess = r.get("session") or {}
+        if isinstance(sess, dict):
+            d.update(sess)
+        users[uid] = d
+    return users
 
 def save_users(u):
-    with open(USERS_FILE, "w") as f: json.dump(u, f, indent=2)
+    conn = db_conn()
+    with conn.cursor() as cur:
+        for uid, d in u.items():
+            session = {k: v for k, v in d.items() if k not in _USER_RESERVED_KEYS}
+            cur.execute(
+                """
+                INSERT INTO users (telegram_id, username, chain, assets_id, address_list, state, session, updated_at)
+                VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s::jsonb, now())
+                ON CONFLICT (telegram_id) DO UPDATE SET
+                    username = EXCLUDED.username,
+                    chain = EXCLUDED.chain,
+                    assets_id = EXCLUDED.assets_id,
+                    address_list = EXCLUDED.address_list,
+                    state = EXCLUDED.state,
+                    session = EXCLUDED.session,
+                    updated_at = now()
+                """,
+                (
+                    str(uid),
+                    d.get("username"),
+                    d.get("chain") or "bsc",
+                    d.get("assets_id"),
+                    json.dumps(d.get("address_list") or []),
+                    d.get("state"),
+                    json.dumps(session),
+                ),
+            )
+    conn.commit()
 
 def load_trades():
-    if os.path.exists(TRADES_FILE):
-        with open(TRADES_FILE) as f: return json.load(f)
-    return {}
+    conn = db_conn()
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute("SELECT telegram_id, token_address, chain, symbol, entry_price, invested_usdt, tp_pct, sl_pct, status FROM trades")
+        rows = cur.fetchall()
+    trades = {}
+    for r in rows:
+        uid = r["telegram_id"]
+        trades.setdefault(uid, {})
+        trades[uid][r["token_address"]] = {
+            "chain": r.get("chain"),
+            "symbol": r.get("symbol"),
+            "entry_price": float(r["entry_price"]) if r.get("entry_price") is not None else 0.0,
+            "invested_usdt": float(r["invested_usdt"]) if r.get("invested_usdt") is not None else 0.0,
+            "tp_pct": float(r["tp_pct"]) if r.get("tp_pct") is not None else 0.0,
+            "sl_pct": float(r["sl_pct"]) if r.get("sl_pct") is not None else 0.0,
+            "status": r.get("status") or "active",
+        }
+    return trades
 
 def save_trades(t):
-    with open(TRADES_FILE, "w") as f: json.dump(t, f, indent=2)
+    conn = db_conn()
+    with conn.cursor() as cur:
+        for uid, items in t.items():
+            cur.execute("DELETE FROM trades WHERE telegram_id = %s", (str(uid),))
+            if not items:
+                continue
+            for token_address, d in items.items():
+                cur.execute(
+                    """
+                    INSERT INTO trades (telegram_id, token_address, chain, symbol, entry_price, invested_usdt, tp_pct, sl_pct, status, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+                    ON CONFLICT (telegram_id, token_address, chain) DO UPDATE SET
+                        symbol = EXCLUDED.symbol,
+                        entry_price = EXCLUDED.entry_price,
+                        invested_usdt = EXCLUDED.invested_usdt,
+                        tp_pct = EXCLUDED.tp_pct,
+                        sl_pct = EXCLUDED.sl_pct,
+                        status = EXCLUDED.status,
+                        updated_at = now()
+                    """,
+                    (
+                        str(uid),
+                        token_address,
+                        d.get("chain") or "bsc",
+                        d.get("symbol"),
+                        d.get("entry_price") or 0,
+                        d.get("invested_usdt") or 0,
+                        d.get("tp_pct") or 0,
+                        d.get("sl_pct") or 0,
+                        d.get("status") or "active",
+                    ),
+                )
+    conn.commit()
 
 def load_copy_trades():
-    if os.path.exists(COPY_TRADES_FILE):
-        with open(COPY_TRADES_FILE) as f: return json.load(f)
-    return {}
+    conn = db_conn()
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute("SELECT telegram_id, target_wallet, chain, pct_allocation, max_usdt_per_trade, last_tx_hash, status FROM copy_trades")
+        rows = cur.fetchall()
+    copy_trades = {}
+    for r in rows:
+        uid = r["telegram_id"]
+        copy_trades.setdefault(uid, {})
+        copy_trades[uid][r["target_wallet"]] = {
+            "chain": r.get("chain") or "bsc",
+            "pct_allocation": float(r["pct_allocation"]) if r.get("pct_allocation") is not None else 0.0,
+            "max_usdt_per_trade": float(r["max_usdt_per_trade"]) if r.get("max_usdt_per_trade") is not None else 0.0,
+            "last_tx_hash": r.get("last_tx_hash") or "",
+            "status": r.get("status") or "active",
+        }
+    return copy_trades
 
 def save_copy_trades(t):
-    with open(COPY_TRADES_FILE, "w") as f: json.dump(t, f, indent=2)
+    conn = db_conn()
+    with conn.cursor() as cur:
+        for uid, items in t.items():
+            cur.execute("DELETE FROM copy_trades WHERE telegram_id = %s", (str(uid),))
+            if not items:
+                continue
+            for target_wallet, d in items.items():
+                cur.execute(
+                    """
+                    INSERT INTO copy_trades (telegram_id, target_wallet, chain, pct_allocation, max_usdt_per_trade, last_tx_hash, status, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, now())
+                    ON CONFLICT (telegram_id, target_wallet, chain) DO UPDATE SET
+                        pct_allocation = EXCLUDED.pct_allocation,
+                        max_usdt_per_trade = EXCLUDED.max_usdt_per_trade,
+                        last_tx_hash = EXCLUDED.last_tx_hash,
+                        status = EXCLUDED.status,
+                        updated_at = now()
+                    """,
+                    (
+                        str(uid),
+                        target_wallet,
+                        d.get("chain") or "bsc",
+                        d.get("pct_allocation") or 0,
+                        d.get("max_usdt_per_trade") or 0,
+                        d.get("last_tx_hash") or "",
+                        d.get("status") or "active",
+                    ),
+                )
+    conn.commit()
 
 def proxy_headers(method, path, body=None):
     import base64, datetime, hashlib, hmac
@@ -1039,6 +1230,11 @@ async def cmd_quote(u, ctx):
 
 def main():
     if not BOT_TOKEN: print("ERROR: TELEGRAM_BOT_TOKEN not set"); return
+    try:
+        db_init()
+    except Exception as e:
+        print("ERROR: Database init failed: " + str(e))
+        return
     app = Application.builder().token(BOT_TOKEN).build()
     for cmd, fn in [
         ("start", cmd_start), ("register", cmd_register), ("deposit", cmd_deposit),
@@ -1056,6 +1252,7 @@ def main():
     
     async def run_tasks():
         asyncio.create_task(monitor_tp_sl(app))
+        asyncio.create_task(monitor_copy_trades(app))
     
     app.post_init = lambda a: run_tasks()
     
