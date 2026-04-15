@@ -1,43 +1,7 @@
-"""SignalBot v2 - Ave proxy wallet integration"""
-import os, json, asyncio, sys, urllib.request, urllib.parse, base64, datetime, hmac, hashlib
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
-from dotenv import load_dotenv
+from signal_telegram import main
 
-AVENUE_SCRIPTS = "/home/workspace/ave-cloud-skill/scripts"
-# Try using relative path for the workspace if absolute path doesn't exist
-if not os.path.exists(AVENUE_SCRIPTS):
-    AVENUE_SCRIPTS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ave-cloud-skill", "scripts")
-sys.path.insert(0, AVENUE_SCRIPTS)
-load_dotenv("/workspace/.env")
-BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-AVE_API_KEY = os.environ.get("AVE_API_KEY", "")
-AVE_SECRET_KEY = os.environ.get("AVE_SECRET_KEY", "")
-API_PLAN = os.environ.get("API_PLAN", "pro")
-USERS_FILE = "/workspace/users.json"
-TRADES_FILE = "/workspace/trades.json"
-COPY_TRADES_FILE = "/workspace/copy_trades.json"
-
-def load_users():
-    if os.path.exists(USERS_FILE):
-        with open(USERS_FILE) as f: return json.load(f)
-    return {}
-
-def save_users(u):
-    with open(USERS_FILE, "w") as f: json.dump(u, f, indent=2)
-
-def load_trades():
-    if os.path.exists(TRADES_FILE):
-        with open(TRADES_FILE) as f: return json.load(f)
-    return {}
-
-def save_trades(t):
-    with open(TRADES_FILE, "w") as f: json.dump(t, f, indent=2)
-
-def load_copy_trades():
-    if os.path.exists(COPY_TRADES_FILE):
-        with open(COPY_TRADES_FILE) as f: return json.load(f)
-    return {}
+if __name__ == "__main__":
+    main()
 
 def save_copy_trades(t):
     with open(COPY_TRADES_FILE, "w") as f: json.dump(t, f, indent=2)
