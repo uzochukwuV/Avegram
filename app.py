@@ -14,409 +14,38 @@ BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 AVE_API_KEY = os.environ.get("AVE_API_KEY", "")
 AVE_SECRET_KEY = os.environ.get("AVE_SECRET_KEY", "")
 API_PLAN = os.environ.get("API_PLAN", "pro")
-_bot_app = None  # global bot instance for use in command handlers
-# ===== JSON FILE CONSTANTS (fallback when DB unavailable) =====
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-USERS_FILE = os.path.join(BASE_DIR, "users.json")
-TRADES_FILE = os.path.join(BASE_DIR, "trades.json")
-COPY_TRADES_FILE = os.path.join(BASE_DIR, "copy_trades.json")
-SIGNAL_HISTORY_FILE = os.path.join(BASE_DIR, "signal_history.json")
-# ===== DATABASE LAYER =====
-import psycopg2
-from psycopg2.extras import RealDictCursor
-
-DATABASE_URL = os.environ.get("DATABASE_URL", "")
-
-def db_connect():
-    if not DATABASE_URL:
-        return None
-    return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
-
-# ---- Users ----
-def db_get_user(uid):
-    conn = db_connect()
-    if not conn:
-        return None
-    try:
-        cur = conn.cursor()
-        cur.execute("SELECT * FROM users WHERE id = %s", (uid,))
-        return cur.fetchone()
-    finally:
-        conn.close()
-
-def db_save_user(uid, username="", assets_id="", address_list=None, chain="bsc"):
-    conn = db_connect()
-    if not conn:
-        return False
-    try:
-        cur = conn.cursor()
-        cur.execute("""
-            INSERT INTO users (id, username, assets_id, address_list, chain)
-            VALUES (%s, %s, %s, %s, %s)
-            ON CONFLICT (id) DO UPDATE SET
-                username=EXCLUDED.username,
-                assets_id=EXCLUDED.assets_id,
-                address_list=EXCLUDED.address_list,
-                chain=EXCLUDED.chain
-        """, (uid, username, assets_id, json.dumps(address_list or []), chain))
-        conn.commit()
-        return True
-    finally:
-        conn.close()
-
-def db_get_all_users():
-    conn = db_connect()
-    if not conn:
-        return []
-    try:
-        cur = conn.cursor()
-        cur.execute("SELECT * FROM users WHERE assets_id IS NOT NULL")
-        return cur.fetchall()
-    finally:
-        conn.close()
-
-def db_delete_user(uid):
-    conn = db_connect()
-    if not conn:
-        return False
-    try:
-        cur = conn.cursor()
-        cur.execute("DELETE FROM users WHERE id = %s", (uid,))
-        conn.commit()
-        return True
-    finally:
-        conn.close()
-
-# ---- Trades ----
-def db_save_trade(uid, token_address, symbol, chain, entry_price, invested_usdt, tp_pct, sl_pct, status="active"):
-    conn = db_connect()
-    if not conn:
-        return False
-    try:
-        cur = conn.cursor()
-        cur.execute("""
-            INSERT INTO trades (user_id, token_address, symbol, chain, entry_price, invested_usdt, tp_pct, sl_pct, status)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (user_id, token_address) DO UPDATE SET
-                symbol=EXCLUDED.symbol, chain=EXCLUDED.chain, entry_price=EXCLUDED.entry_price,
-                invested_usdt=EXCLUDED.invested_usdt, tp_pct=EXCLUDED.tp_pct, sl_pct=EXCLUDED.sl_pct, status=EXCLUDED.status
-        """, (uid, token_address, symbol, chain, entry_price, invested_usdt, tp_pct, sl_pct, status))
-        conn.commit()
-        return True
-    finally:
-        conn.close()
-
-def db_get_user_trades(uid):
-    conn = db_connect()
-    if not conn:
-        return {}
-    try:
-        cur = conn.cursor()
-        cur.execute("SELECT * FROM trades WHERE user_id = %s AND status = 'active'", (uid,))
-        rows = cur.fetchall()
-        return {r['token_address']: dict(r) for r in rows}
-    finally:
-        conn.close()
-
-def db_get_all_active_trades():
-    conn = db_connect()
-    if not conn:
-        return []
-    try:
-        cur = conn.cursor()
-        cur.execute("SELECT t.*, u.assets_id FROM trades t JOIN users u ON t.user_id = u.id WHERE t.status = 'active'")
-        return cur.fetchall()
-    finally:
-        conn.close()
-
-def db_close_trade(uid, token_address):
-    conn = db_connect()
-    if not conn:
-        return False
-    try:
-        cur = conn.cursor()
-        cur.execute("UPDATE trades SET status = 'closed' WHERE user_id = %s AND token_address = %s", (uid, token_address))
-        conn.commit()
-        return True
-    finally:
-        conn.close()
-
-# ---- Copy Trades ----
-def db_save_copy_trade(uid, target_wallet, chain, pct_allocation, max_usdt_per_trade, last_tx_hash, status="active"):
-    conn = db_connect()
-    if not conn:
-        return False
-    try:
-        cur = conn.cursor()
-        cur.execute("""
-            INSERT INTO copy_trades (user_id, target_wallet, chain, pct_allocation, max_usdt_per_trade, last_tx_hash, status)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (user_id, target_wallet) DO UPDATE SET
-                pct_allocation=EXCLUDED.pct_allocation, max_usdt_per_trade=EXCLUDED.max_usdt_per_trade,
-                last_tx_hash=EXCLUDED.last_tx_hash, status=EXCLUDED.status
-        """, (uid, target_wallet, chain, pct_allocation, max_usdt_per_trade, last_tx_hash, status))
-        conn.commit()
-        return True
-    finally:
-        conn.close()
-
-def db_get_user_copy_trades(uid):
-    conn = db_connect()
-    if not conn:
-        return {}
-    try:
-        cur = conn.cursor()
-        cur.execute("SELECT * FROM copy_trades WHERE user_id = %s AND status = 'active'", (uid,))
-        rows = cur.fetchall()
-        return {r['target_wallet']: dict(r) for r in rows}
-    finally:
-        conn.close()
-
-def db_get_all_active_copy_trades():
-    conn = db_connect()
-    if not conn:
-        return []
-    try:
-        cur = conn.cursor()
-        cur.execute("SELECT ct.*, u.assets_id FROM copy_trades ct JOIN users u ON ct.user_id = u.id WHERE ct.status = 'active'")
-        return cur.fetchall()
-    finally:
-        conn.close()
-
-def db_update_copy_trade_tx(uid, target_wallet, last_tx_hash):
-    conn = db_connect()
-    if not conn:
-        return False
-    try:
-        cur = conn.cursor()
-        cur.execute("UPDATE copy_trades SET last_tx_hash = %s WHERE user_id = %s AND target_wallet = %s", (last_tx_hash, uid, target_wallet))
-        conn.commit()
-        return True
-    finally:
-        conn.close()
-
-# ---- Signal History ----
-def db_save_signal(signal_id, symbol, token_address, chain, signal_type, confidence, entry_price, duration_hours=4):
-    conn = db_connect()
-    if not conn:
-        return False
-    try:
-        from datetime import datetime, timezone, timedelta
-        cur = conn.cursor()
-        expires_at = datetime.now(timezone.utc) + timedelta(hours=duration_hours)
-        cur.execute("""
-            INSERT INTO signal_history (signal_id, symbol, token_address, chain, signal_type, confidence, entry_price, duration_hours, status, expires_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'active', %s)
-            ON CONFLICT (signal_id) DO NOTHING
-        """, (signal_id, symbol, token_address, chain, signal_type, confidence, entry_price, duration_hours, expires_at))
-        conn.commit()
-        return True
-    finally:
-        conn.close()
-
-def db_close_signal(signal_id, close_price, pnl_pct, result):
-    conn = db_connect()
-    if not conn:
-        return False
-    try:
-        from datetime import datetime, timezone
-        cur = conn.cursor()
-        cur.execute("""
-            UPDATE signal_history SET status='closed', close_price=%s, pnl_pct=%s, result=%s, closed_at=NOW()
-            WHERE signal_id=%s
-        """, (close_price, pnl_pct, result, signal_id))
-        conn.commit()
-        return True
-    finally:
-        conn.close()
-
-def db_get_active_signals():
-    conn = db_connect()
-    if not conn:
-        return []
-    try:
-        cur = conn.cursor()
-        cur.execute("SELECT * FROM signal_history WHERE status = 'active'")
-        return cur.fetchall()
-    finally:
-        conn.close()
-
-def db_get_signal_stats():
-    conn = db_connect()
-    if not conn:
-        return {}
-    try:
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT
-                COUNT(*) as total,
-                COUNT(*) FILTER (WHERE status = 'closed') as closed,
-                COUNT(*) FILTER (WHERE status = 'active') as active,
-                COUNT(*) FILTER (WHERE result = 'won') as won,
-                COUNT(*) FILTER (WHERE result = 'lost') as lost,
-                AVG(pnl_pct) FILTER (WHERE status = 'closed') as avg_pnl,
-                MAX(pnl_pct) FILTER (WHERE status = 'closed') as best,
-                MIN(pnl_pct) FILTER (WHERE status = 'closed') as worst,
-                AVG(confidence) as avg_confidence
-            FROM signal_history
-        """)
-        return dict(cur.fetchone())
-    finally:
-        conn.close()
-
-def db_get_recent_signals(limit=10):
-    conn = db_connect()
-    if not conn:
-        return []
-    try:
-        cur = conn.cursor()
-        cur.execute("SELECT * FROM signal_history ORDER BY created_at DESC LIMIT %s", (limit,))
-        return cur.fetchall()
-    finally:
-        conn.close()
-
-
-# ===== BACKWARD COMPATIBILITY (file-based fallback) =====
-# Keep JSON file ops as fallback if DB is not available
+USERS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "users.json")
+TRADES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "trades.json")
+COPY_TRADES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "copy_trades.json")
 
 def load_users():
-    db_user = db_get_user_all_map()
-    if db_user:
-        return db_user
     if os.path.exists(USERS_FILE):
         with open(USERS_FILE) as f: return json.load(f)
     return {}
 
-def db_get_user_all_map():
-    conn = db_connect()
-    if not conn:
-        return None
-    try:
-        cur = conn.cursor()
-        cur.execute("SELECT id, username, assets_id, address_list, chain FROM users")
-        rows = cur.fetchall()
-        if not rows:
-            return None
-        result = {}
-        for r in rows:
-            result[str(r['id'])] = {
-                "username": r['username'] or '',
-                "assets_id": r['assets_id'] or '',
-                "address_list": r['address_list'] or [],
-                "chain": r['chain'] or 'bsc'
-            }
-        return result
-    finally:
-        conn.close()
-
 def save_users(u):
-    if not u:
-        return
-    conn = db_connect()
-    if conn:
-        try:
-            for uid, data in u.items():
-                db_save_user(int(uid), data.get('username', ''), data.get('assets_id', ''), data.get('address_list', []), data.get('chain', 'bsc'))
-        finally:
-            conn.close()
-    else:
-        with open(USERS_FILE, "w") as f:
-            json.dump(u, f, indent=2)
+    with open(USERS_FILE, "w") as f: json.dump(u, f, indent=2)
 
 def load_trades():
-    conn = db_connect()
-    if conn:
-        try:
-            cur = conn.cursor()
-            cur.execute("SELECT t.*, u.assets_id FROM trades t JOIN users u ON t.user_id = u.id WHERE t.status = 'active'")
-            rows = cur.fetchall()
-            if rows:
-                result = {}
-                for r in rows:
-                    uid = str(r['user_id'])
-                    if uid not in result:
-                        result[uid] = {}
-                    result[uid][r['token_address']] = {
-                        "symbol": r['symbol'],
-                        "chain": r['chain'],
-                        "entry_price": float(r['entry_price']) if r['entry_price'] else 0,
-                        "invested_usdt": float(r['invested_usdt']) if r['invested_usdt'] else 0,
-                        "tp_pct": float(r['tp_pct']) if r['tp_pct'] else 0,
-                        "sl_pct": float(r['sl_pct']) if r['sl_pct'] else 0,
-                        "status": r['status'],
-                        "assets_id": r['assets_id']
-                    }
-                return result
-        finally:
-            conn.close()
     if os.path.exists(TRADES_FILE):
         with open(TRADES_FILE) as f: return json.load(f)
     return {}
 
 def save_trades(t):
-    if not t:
-        return
-    conn = db_connect()
-    if conn:
-        try:
-            for uid, user_trades in t.items():
-                for ta, data in user_trades.items():
-                    db_save_trade(int(uid), ta, data.get('symbol', ''), data.get('chain', 'bsc'),
-                                  data.get('entry_price', 0), data.get('invested_usdt', 0),
-                                  data.get('tp_pct', 0), data.get('sl_pct', 0), data.get('status', 'active'))
-        finally:
-            conn.close()
-    else:
-        with open(TRADES_FILE, "w") as f:
-            json.dump(t, f, indent=2)
+    with open(TRADES_FILE, "w") as f: json.dump(t, f, indent=2)
 
 def load_copy_trades():
-    conn = db_connect()
-    if conn:
-        try:
-            cur = conn.cursor()
-            cur.execute("SELECT ct.*, u.assets_id FROM copy_trades ct JOIN users u ON ct.user_id = u.id WHERE ct.status = 'active'")
-            rows = cur.fetchall()
-            if rows:
-                result = {}
-                for r in rows:
-                    uid = str(r['user_id'])
-                    if uid not in result:
-                        result[uid] = {}
-                    result[uid][r['target_wallet']] = {
-                        "chain": r['chain'],
-                        "pct_allocation": float(r['pct_allocation']) if r['pct_allocation'] else 10,
-                        "max_usdt_per_trade": float(r['max_usdt_per_trade']) if r['max_usdt_per_trade'] else 50,
-                        "last_tx_hash": r['last_tx_hash'] or '',
-                        "status": r['status'],
-                        "assets_id": r['assets_id']
-                    }
-                return result
-        finally:
-            conn.close()
     if os.path.exists(COPY_TRADES_FILE):
         with open(COPY_TRADES_FILE) as f: return json.load(f)
     return {}
 
 def save_copy_trades(t):
-    if not t:
-        return
-    conn = db_connect()
-    if conn:
-        try:
-            for uid, targets in t.items():
-                for tw, data in targets.items():
-                    db_save_copy_trade(int(uid), tw, data.get('chain', 'bsc'),
-                                       data.get('pct_allocation', 10), data.get('max_usdt_per_trade', 50),
-                                       data.get('last_tx_hash', ''), data.get('status', 'active'))
-        finally:
-            conn.close()
-    else:
-        with open(COPY_TRADES_FILE, "w") as f:
-            json.dump(t, f, indent=2)
+    with open(COPY_TRADES_FILE, "w") as f: json.dump(t, f, indent=2)
+
+def proxy_headers(method, path, body=None):
     import base64, datetime, hashlib, hmac
     ts = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
-    msg = ts + method.upper() + path
+    msg = ts + method.upper().strip() + path.strip()
     if body: msg += json.dumps(body, sort_keys=True, separators=(",", ":"))
     sig = base64.b64encode(hmac.new(AVE_SECRET_KEY.encode(), msg.encode(), hashlib.sha256).digest()).decode()
     return {"AVE-ACCESS-KEY": AVE_API_KEY, "AVE-ACCESS-TIMESTAMP": ts, "AVE-ACCESS-SIGN": sig, "Content-Type": "application/json"}
@@ -434,13 +63,29 @@ def proxy_post(path, body):
     req = urllib.request.Request("https://bot-api.ave.ai" + path, data=data, headers=proxy_headers("POST", path, body))
     with urllib.request.urlopen(req, timeout=15) as r: return json.loads(r.read())
 
-def auto_link_wallet(uid_str, username):
+def auto_link_wallet(uid_str, username=None):
     users = load_users()
-    # Only link from local users.json - never query API for a shared wallet
-    return uid_str in users and bool(users[uid_str].get("assets_id"))
+    if uid_str in users and users[uid_str].get("assets_id"):
+        return True
 
-async def show_main_menu(message, uid, edit=False, username=""):
-    auto_link_wallet(str(uid), username)
+    r = proxy_get("/v1/thirdParty/user/getUserByAssetsId")
+    if r.get("status") in (200, 0) and r.get("data"):
+        wallets = r["data"]
+        if wallets:
+            w = wallets[0]
+            if uid_str not in users:
+                users[uid_str] = {"chain": "bsc"}
+            if username:
+                users[uid_str]["username"] = username
+            users[uid_str]["assets_id"] = w["assetsId"]
+            users[uid_str]["address_list"] = w.get("addressList", [])
+            save_users(users)
+            return True
+
+    return False
+
+async def show_main_menu(message, uid, edit=False, username=None):
+    auto_link_wallet(str(uid), username=username)
     users = load_users()
     uid_str = str(uid)
     text = "🚀 *Avegram Dashboard*\n\nPowered by Ave Cloud API"
@@ -453,7 +98,6 @@ async def show_main_menu(message, uid, edit=False, username=""):
             [InlineKeyboardButton("💱 Trade", callback_data="cb_trade"), InlineKeyboardButton("📡 Scan Signals", callback_data="cb_signal")],
             [InlineKeyboardButton("⬇️ Deposit", callback_data="cb_deposit"), InlineKeyboardButton("⬆️ Withdraw", callback_data="cb_withdraw")],
             [InlineKeyboardButton("🐋 Smart Money Wallets", callback_data="cb_topwallets")],
-            [InlineKeyboardButton("📊 Analytics", callback_data="cb_analytics")],
             [InlineKeyboardButton("❓ Help", callback_data="cb_help")]
         ]
     
@@ -475,42 +119,6 @@ async def handle_callback(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
             users[str(uid)]["state"] = None
             save_users(users)
         await show_main_menu(query.message, uid, edit=True, username=u.effective_user.username)
-    elif data == "cb_analytics":
-        await cmd_analytics(u, ctx, is_callback=True)
-    elif data.startswith("sell_"):
-        parts = data.split("_")
-        if len(parts) >= 3:
-            ta = parts[1]
-            sym = "_".join(parts[2:])  # symbol may have underscores
-            users = load_users()
-            uid_str = str(u.effective_user.id)
-            if uid_str in users and users[uid_str].get("assets_id"):
-                # Get current balance from on-chain data
-                bsc_addr = next((a["address"] for a in users[uid_str].get("address_list", []) if a["chain"] == "bsc"), "")
-                if bsc_addr:
-                    try:
-                        r2 = await api_get("/address/walletinfo/tokens", {
-                            "wallet_address": bsc_addr, "chain": "bsc",
-                            "sort": "balance_usd", "sort_dir": "desc", "pageSize": 50
-                        })
-                        bal = 0.0
-                        if r2.status_code == 200:
-                            for t in r2.json().get("data", []):
-                                if t.get("token", "").lower() == ta.lower():
-                                    bal = float(t.get("balance_amount", 0) or 0)
-                                    break
-                    except Exception as e:
-                        print(f"Balance lookup error: {e}")
-                users[uid_str]["state"] = "awaiting_sell_amount"
-                users[uid_str]["sell_token"] = {"addr": ta, "symbol": sym, "balance": bal}
-                save_users(users)
-                kb = [[InlineKeyboardButton("🔙 Cancel", callback_data="cb_menu")]]
-                rm = InlineKeyboardMarkup(kb)
-                await query.message.edit_text(f"💸 *Sell {sym}*\n\nBalance: {bal}\nEnter amount of {sym} to sell:", reply_markup=rm, parse_mode="Markdown")
-            else:
-                await query.answer("Use /register first", show_alert=True)
-        return
-
     elif data == "cb_register":
         await cmd_register(u, ctx, is_callback=True)
     elif data == "cb_balance":
@@ -524,7 +132,7 @@ async def handle_callback(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif data == "cb_deposit":
         await cmd_deposit(u, ctx, is_callback=True)
     elif data == "cb_withdraw":
-        auto_link_wallet(str(uid), u.effective_user.username)
+        auto_link_wallet(str(uid), username=u.effective_user.username)
         users = load_users()
         uid_str = str(uid)
         users[uid_str]["state"] = "awaiting_withdraw_address"
@@ -532,7 +140,7 @@ async def handle_callback(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
         keyboard = [[InlineKeyboardButton("🔙 Cancel", callback_data="cb_menu")]]
         await query.message.edit_text("💸 *Withdraw Funds*\n\nPlease paste the destination BSC address:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
     elif data == "cb_trade":
-        auto_link_wallet(str(uid), u.effective_user.username)
+        auto_link_wallet(str(uid), username=u.effective_user.username)
         users = load_users()
         uid_str = str(uid)
         users[uid_str]["state"] = "awaiting_trade_input"
@@ -586,7 +194,6 @@ async def handle_callback(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def handle_text(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = str(u.effective_user.id)
-    usdt_addr = "0x55d398326f99059fF775485246999027B3197955"
     users = load_users()
     if uid not in users or "state" not in users[uid]:
         return
@@ -625,37 +232,6 @@ async def handle_text(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
             def __init__(self, args):
                 self.args = args
         await cmd_trade(u, MockCtx(parts), is_callback=False)
-
-    elif state == "awaiting_sell_amount":
-        try:
-            sell_cfg = users[uid]["sell_token"]
-            ta = sell_cfg["addr"]
-            sym = sell_cfg["symbol"]
-            bal = sell_cfg["balance"]
-            amount = min(float(text), bal)
-            users[uid]["state"] = None
-            save_users(users)
-
-            in_amount_wei = str(int(amount * 1e18))
-            qr = proxy_post("/v1/thirdParty/tx/sendSwapOrder", {
-                "chain": "bsc", "assetsId": users[uid]["assets_id"],
-                "inTokenAddress": ta, "outTokenAddress": usdt_addr,
-                "inAmount": in_amount_wei, "swapType": "sell", "slippage": "1500"
-            })
-
-            kb = [[InlineKeyboardButton("🔙 Back to Menu", callback_data="cb_menu")]]
-            rm = InlineKeyboardMarkup(kb)
-
-            if qr.get("status") in (200, 0):
-                oid = qr.get("data", {}).get("id", "") if isinstance(qr.get("data", {}), dict) else ""
-                await u.message.reply_text(f"✅ *Sell submitted!*\nSold {round(amount, 4)} {sym}\nOrder ID: `{oid}`", reply_markup=rm, parse_mode="Markdown")
-            else:
-                err = qr.get("msg", "Unknown error")
-                kb2 = [[InlineKeyboardButton("🔄 Retry", callback_data=f"retry_bsc_{users[uid]['assets_id']}_{ta}_{usdt_addr}_{in_amount_wei}_sell"), InlineKeyboardButton("❌ Dismiss", callback_data="cb_dismiss")]]
-                await u.message.reply_text(f"❌ *Sell failed!*\nReason: {err}", reply_markup=InlineKeyboardMarkup(kb2), parse_mode="Markdown")
-        except ValueError:
-            await u.message.reply_text("Invalid amount.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Cancel", callback_data="cb_menu")]]))
-        return
 
     elif state == "awaiting_auto_trade_amount":
         try:
@@ -718,7 +294,7 @@ async def handle_text(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
             aid = users[uid]["assets_id"]
             usdt = "0x55d398326f99059fF775485246999027B3197955"
             
-            qr = proxy_post("/v1/thirdParty/tx/sendSwapOrder", {"chain": chain, "assetsId": aid, "inTokenAddress": usdt, "outTokenAddress": ta, "inAmount": str(int(amount * 1e18)), "swapType": "buy", "slippage": "1000"})
+            qr = proxy_post("/v1/thirdParty/tx/sendSwapOrder", {"chain": chain, "assetsId": aid, "inTokenAddress": usdt, "outTokenAddress": ta, "inAmount": str(int(amount * 1e18)), "slippage": "1000"})
             
             if qr.get("status") not in (200, 0):
                 err_msg = qr.get('msg', 'Unknown Error')
@@ -813,180 +389,86 @@ async def handle_text(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await u.message.reply_text("Invalid amount. Enter a positive number.", reply_markup=rm)
 
 async def monitor_tp_sl(app: Application):
-    """Background WSS task — real-time TP/SL monitoring via WebSocket price stream."""
-    import websockets, json
+    """Background task to monitor prices and trigger TP/SL."""
     from ave.http import api_get
-
     usdt_addr = "0x55d398326f99059fF775485246999027B3197955"
-    WSS_BASE = "wss://wss.ave-api.xyz"
-
-    async def get_ws_headers():
-        return {"X-API-KEY": AVE_API_KEY}
-
-    def load_active_trades():
-        all_trades = load_trades()
-        result = {}  # key: (token_address, chain) -> {uid, sym, entry, tp_pct, sl_pct, aid}
-        for uid, user_trades in all_trades.items():
-            for ta, t in user_trades.items():
-                if t.get("status") != "active":
-                    continue
-                chain = t.get("chain", "bsc")
-                key = (ta.lower(), chain)
-                if key not in result:
-                    result[key] = {
-                        "uid": uid, "sym": t.get("symbol", "?"),
-                        "entry": t.get("entry_price", 0),
-                        "tp_pct": t.get("tp_pct", 50),
-                        "sl_pct": t.get("sl_pct", -20),
-                        "aid": users.get(uid, {}).get("assets_id") if uid in users else None
-                    }
-        return result
-
+    
     while True:
         try:
-            users = load_users()
             trades = load_trades()
-            active = load_active_trades()
-
-            if not active:
-                await asyncio.sleep(15)
-                continue
-
-            # Build token list for WSS subscription
-            topics = [f"{ta}-{chain}" for (ta, chain) in active.keys()]
-            if not topics:
-                await asyncio.sleep(15)
-                continue
-
-            # Connect to WSS once, stream prices, handle hits
-            async def run_ws_session():
-                nonlocal active
-                headers = await get_ws_headers()
-                async with websockets.connect(WSS_BASE, additional_headers=headers) as ws:
-                    # Subscribe to all active tokens
-                    await ws.send(json.dumps({
-                        "method": "subscribe",
-                        "params": ["price", topics],
-                        "id": 1
-                    }))
-
-                    session_deadline = asyncio.get_event_loop().time() + 55  # refresh every 55s
-
-                    while asyncio.get_event_loop().time() < session_deadline:
-                        try:
-                            msg = await asyncio.wait_for(ws.recv(), timeout=10)
-                            data = json.loads(msg)
-                            prices = (
-                                data.get("result", {}).get("prices", []) or
-                                data.get("params", {}).get("data", {}).get("prices", []) or
-                                []
-                            )
-                            for p in prices:
-                                target_token = p.get("target_token", "").lower()
-                                chain = p.get("chain", "bsc")
-                                curr_price = float(p.get("uprice") or 0)
-                                if curr_price == 0:
-                                    continue
-                                key = (target_token, chain)
-                                if key not in active:
-                                    continue
-                                t = active[key]
-                                entry = t["entry"]
-                                if entry == 0:
-                                    continue
-
-                                tp_target = entry * (1 + (t["tp_pct"] / 100))
-                                sl_target = entry * (1 + (t["sl_pct"] / 100))
-
-                                hit_type = None
-                                if curr_price >= tp_target:
-                                    hit_type = "Take-Profit"
-                                elif curr_price <= sl_target:
-                                    hit_type = "Stop-Loss"
-
-                                if not hit_type:
-                                    continue
-
-                                uid = t["uid"]
-                                sym = t["sym"]
-                                aid = t["aid"]
-
-                                # Fetch balance
-                                bal = 0.0
-                                if aid:
-                                    try:
-                                        r = proxy_get("/v1/thirdParty/tx/getSwapOrder", {
-                                            "chain": chain, "assetsId": aid, "pageSize": "50", "pageNO": "0"
-                                        })
-                                        if r.get("status") in (200, 0) and r.get("data"):
-                                            for o in r["data"]:
-                                                if o.get("status") != "confirmed":
-                                                    continue
-                                                if o.get("outTokenAddress", "").lower() == target_token:
-                                                    bal += float(o.get("outAmount", "0")) / 1e18
-                                                elif o.get("inTokenAddress", "").lower() == target_token:
-                                                    bal -= float(o.get("inAmount", "0")) / 1e18
-                                    except Exception:
-                                        pass
-
-                                if bal <= 0.0001:
-                                    # Manually sold — clear trade
-                                    trades = load_trades()
-                                    if uid in trades and target_token in trades[uid]:
-                                        del trades[uid][target_token]
-                                        save_trades(trades)
-                                    active.pop(key, None)
-                                    continue
-
-                                # Execute SELL
-                                if aid:
-                                    try:
-                                        qr = proxy_post("/v1/thirdParty/tx/sendSwapOrder", {
-                                            "chain": chain, "assetsId": aid,
-                                            "inTokenAddress": target_token,
-                                            "outTokenAddress": usdt_addr,
-                                            "inAmount": str(int(bal * 1e18)),
-                                            "swapType": "sell", "slippage": "1500"
-                                        })
-                                        if qr.get("status") in (200, 0):
-                                            pnl_pct = ((curr_price - entry) / entry) * 100
-                                            usd_out = bal * curr_price
-                                            msg_txt = (
-                                                f"🚨 **{hit_type} Hit!**\n\n"
-                                                f"Sold {round(bal, 4)} {sym} for ~${usd_out:.2f}\n"
-                                                f"PNL: {pnl_pct:+.2f}%\n"
-                                                f"Price: ${curr_price:.6f}"
-                                            )
-                                            await app.bot.send_message(chat_id=int(uid), text=msg_txt, parse_mode="Markdown")
-                                            # Clear trade
-                                            trades = load_trades()
-                                            if uid in trades and target_token in trades[uid]:
-                                                del trades[uid][target_token]
-                                                save_trades(trades)
-                                            active.pop(key, None)
-                                        else:
-                                            print(f"SELL failed for {uid} {sym}: {qr.get('msg')}")
-                                    except Exception as e:
-                                        print(f"SELL error: {e}")
-
-                                # Remove processed token from active
-                                active.pop(key, None)
-
-                        except TimeoutError:
-                            # No message — just loop to check deadline
+            users = load_users()
+            changed = False
+            
+            for uid, user_trades in list(trades.items()):
+                if uid not in users or not users[uid].get("assets_id"):
+                    continue
+                aid = users[uid]["assets_id"]
+                
+                for ta, t in list(user_trades.items()):
+                    if t.get("status") != "active": continue
+                    
+                    chain = t.get("chain", "bsc")
+                    sym = t.get("symbol", "?")
+                    entry = t.get("entry_price", 0)
+                    if entry == 0: continue
+                    
+                    # Fetch current price
+                    pr = await api_get(f"/tokens/{ta}-{chain}")
+                    if pr.status_code != 200 or not pr.json().get("data"):
+                        continue
+                        
+                    curr_price = float(pr.json()["data"].get("token", {}).get("current_price_usd", 0))
+                    if curr_price == 0: continue
+                    
+                    tp_target = entry * (1 + (t["tp_pct"] / 100))
+                    sl_target = entry * (1 + (t["sl_pct"] / 100))
+                    
+                    hit_type = None
+                    if curr_price >= tp_target: hit_type = "Take-Profit"
+                    elif curr_price <= sl_target: hit_type = "Stop-Loss"
+                    
+                    if hit_type:
+                        # 1. Fetch current token balance
+                        r = proxy_get("/v1/thirdParty/tx/getSwapOrder", {"chain": chain, "assetsId": aid, "pageSize": "50", "pageNO": "0"})
+                        bal = 0.0
+                        if r.get("status") in (200, 0) and r.get("data"):
+                            for o in r["data"]:
+                                if o.get("status") != "confirmed": continue
+                                if o.get("outTokenAddress") == ta: bal += float(o.get("outAmount", "0")) / 1e18
+                                elif o.get("inTokenAddress") == ta: bal -= float(o.get("inAmount", "0")) / 1e18
+                        
+                        if bal <= 0.0001:
+                            # User already sold manually
+                            del trades[uid][ta]
+                            changed = True
                             continue
-                        except Exception as e:
-                            print(f"WSS session error: {e}")
-                            break
-
-                    await ws.send(json.dumps({"method": "unsubscribe", "params": ["price", topics], "id": 2}))
-
-            await run_ws_session()
-
+                            
+                        # 2. Execute SELL order
+                        in_amount_wei = str(int(bal * 1e18)) # Assuming 18 decimals, proxy_post will handle exact if needed but we send max wei
+                        qr = proxy_post("/v1/thirdParty/tx/sendSwapOrder", {
+                            "chain": chain, "assetsId": aid, "inTokenAddress": ta, "outTokenAddress": usdt_addr, 
+                            "inAmount": in_amount_wei, "slippage": "1500"
+                        })
+                        
+                        if qr.get("status") in (200, 0):
+                            # Sell successful
+                            pnl_pct = ((curr_price - entry) / entry) * 100
+                            usd_out = bal * curr_price
+                            msg = f"🚨 **{hit_type} Hit!**\n\nSold {round(bal, 4)} {sym} for ~${usd_out:.2f}\nPNL: {pnl_pct:+.2f}%\nPrice: ${curr_price:.6f}"
+                            await app.bot.send_message(chat_id=uid, text=msg, parse_mode="Markdown")
+                            del trades[uid][ta]
+                            changed = True
+                        else:
+                            # Failed to sell
+                            print(f"TP/SL Sell failed for {uid} {sym}: {qr}")
+                            
+            if changed:
+                save_trades(trades)
+                
         except Exception as e:
             print(f"TP/SL Monitor error: {e}")
-
-        await asyncio.sleep(5)  # Restart WSS connection loop
+            
+        await asyncio.sleep(30)
 
 
 async def monitor_copy_trades(app: Application):
@@ -1009,16 +491,21 @@ async def monitor_copy_trades(app: Application):
                     
                     chain = cfg.get("chain", "bsc")
                     # Fetch latest txs for target wallet
-                    r = await api_get("/address/walletinfo/transactions", {"wallet_address": target_addr, "chain": chain, "pageSize": 5, "pageNO": 0})
+                    # Use /address/tx instead of walletinfo/transactions
+                    r = await api_get("/address/tx", {"wallet_address": target_addr, "chain": chain, "pageSize": 5, "pageNO": 0})
                     if r.status_code != 200: continue
                     data = r.json()
-                    if data.get("status") != 1 or not data.get("data"): continue
-                    
-                    txs = data["data"]
+                    txs_data = data.get("data", {})
+                    if isinstance(txs_data, dict):
+                        txs = txs_data.get("result", [])
+                    elif isinstance(txs_data, list):
+                        txs = txs_data
+                    else:
+                        continue
                     if not txs: continue
                     
                     latest_tx = txs[0]
-                    tx_hash = latest_tx.get("transaction_hash", "")
+                    tx_hash = latest_tx.get("transaction", "")
                     
                     # If this is the first poll, just set the hash and continue
                     if not cfg.get("last_tx_hash"):
@@ -1033,29 +520,31 @@ async def monitor_copy_trades(app: Application):
                     cfg["last_tx_hash"] = tx_hash
                     changed = True
                     
-                    tx_type = latest_tx.get("trade_type", "")
-                    token_addr = latest_tx.get("token_address", "")
-                    token_sym = latest_tx.get("symbol", "?")
+                    # Determine swap direction from tx fields
+                    from_addr = latest_tx.get("from_address", "")
+                    to_addr = latest_tx.get("to_address", "")
+                    from_sym = latest_tx.get("from_symbol", "")
+                    to_sym = latest_tx.get("to_symbol", "")
+                    from_amount = latest_tx.get("from_amount", 0)
+                    to_amount = latest_tx.get("to_amount", 0)
+                    tx_token_addr = latest_tx.get("to_address", "") if float(from_amount or 0) > 0 else latest_tx.get("from_address", "")
+                    
+                    # Classify as buy if WBNB (or native) was spent, else sell
+                    is_buy = from_addr.lower() == "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c"
+                    tx_type = "buy" if is_buy else "sell"
+                    token_sym = to_sym if is_buy else from_sym
                     
                     # Ensure it's a swap we can mirror
-                    if tx_type not in ("buy", "sell") or not token_addr: continue
+                    if not tx_token_addr or tx_token_addr in ("0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c", usdt_addr): continue
                     
                     try:
-                        # Find User's USDT balance
-                        user_bal_resp = proxy_get("/v1/thirdParty/tx/getSwapOrder", {"chain": chain, "assetsId": aid, "pageSize": 50, "pageNO": 0})
+                        trade_amount = cfg["max_usdt_per_trade"]
                         
                         if tx_type == "buy":
-                            # Calculate user's USDT balance to determine trade size
-                            # We'll use a mock total since we don't have a direct wallet balance endpoint in the provided snippets.
-                            # Usually, we would query the proxy wallet balance directly. 
-                            # For safety in this mockup, we'll just try to use the max_usdt config limit if they have it.
-                            trade_amount = cfg["max_usdt_per_trade"]
-                            
-                            # Execute Buy
                             in_amount_wei = str(int(trade_amount * 1e18))
                             qr = proxy_post("/v1/thirdParty/tx/sendSwapOrder", {
-                                "chain": chain, "assetsId": aid, "inTokenAddress": usdt_addr, "outTokenAddress": token_addr, 
-                                "inAmount": in_amount_wei, "swapType": "buy", "slippage": "1500"
+                                "chain": chain, "assetsId": aid, "inTokenAddress": usdt_addr, "outTokenAddress": tx_token_addr, 
+                                "inAmount": in_amount_wei, "slippage": "1500"
                             })
                             
                             if qr.get("status") in (200, 0):
@@ -1063,26 +552,26 @@ async def monitor_copy_trades(app: Application):
                                 await app.bot.send_message(chat_id=uid, text=msg, parse_mode="Markdown")
                             else:
                                 err_msg = qr.get('msg', 'Unknown Error')
-                                kb = [[InlineKeyboardButton("🔄 Retry Buy", callback_data=f"retry_{chain}_{aid}_{usdt_addr}_{token_addr}_{in_amount_wei}_buy"), InlineKeyboardButton("❌ Dismiss", callback_data="cb_dismiss")]]
+                                kb = [[InlineKeyboardButton("🔄 Retry Buy", callback_data=f"retry_{chain}_{aid}_{usdt_addr}_{tx_token_addr}_{in_amount_wei}_buy"), InlineKeyboardButton("❌ Dismiss", callback_data="cb_dismiss")]]
                                 await app.bot.send_message(chat_id=uid, text=f"❌ **Copy Trade Failed (Buy {token_sym})**\nReason: {err_msg}", reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
                                 
-                        elif tx_type == "sell":
-                            # For sell, we would look up the user's holding of `token_addr` and sell 100%
-                            # In a full impl, we'd calculate the proportional sell amount. Here we do 100% for safety.
-                            
-                            # Calculate user's token balance
+                        else:  # sell
+                            # For sell, look up token balance from on-chain wallet tokens
                             bal = 0.0
-                            if user_bal_resp.get("status") in (200, 0) and user_bal_resp.get("data"):
-                                for o in user_bal_resp["data"]:
-                                    if o.get("status") != "confirmed": continue
-                                    if o.get("outTokenAddress") == token_addr: bal += float(o.get("outAmount", "0")) / 1e18
-                                    elif o.get("inTokenAddress") == token_addr: bal -= float(o.get("inAmount", "0")) / 1e18
+                            try:
+                                bal_r = proxy_get("/address/walletinfo/tokens", {"wallet_address": bsc_addr, "chain": chain, "pageSize": 50})
+                                for tok in bal_r.get("data", []):
+                                    if tok.get("token", "").lower() == tx_token_addr.lower():
+                                        bal = float(tok.get("balance_amount", 0) or 0)
+                                        break
+                            except Exception:
+                                pass
                                     
                             if bal > 0.0001:
                                 in_amount_wei = str(int(bal * 1e18))
                                 qr = proxy_post("/v1/thirdParty/tx/sendSwapOrder", {
-                                    "chain": chain, "assetsId": aid, "inTokenAddress": token_addr, "outTokenAddress": usdt_addr, 
-                                    "inAmount": in_amount_wei, "swapType": "sell", "slippage": "1500"
+                                    "chain": chain, "assetsId": aid, "inTokenAddress": tx_token_addr, "outTokenAddress": usdt_addr, 
+                                    "inAmount": in_amount_wei, "slippage": "1500"
                                 })
                                 
                                 if qr.get("status") in (200, 0):
@@ -1090,7 +579,7 @@ async def monitor_copy_trades(app: Application):
                                     await app.bot.send_message(chat_id=uid, text=msg, parse_mode="Markdown")
                                 else:
                                     err_msg = qr.get('msg', 'Unknown Error')
-                                    kb = [[InlineKeyboardButton("🔄 Retry Sell", callback_data=f"retry_{chain}_{aid}_{token_addr}_{usdt_addr}_{in_amount_wei}_sell"), InlineKeyboardButton("❌ Dismiss", callback_data="cb_dismiss")]]
+                                    kb = [[InlineKeyboardButton("🔄 Retry Sell", callback_data=f"retry_{chain}_{aid}_{tx_token_addr}_{usdt_addr}_{in_amount_wei}_sell"), InlineKeyboardButton("❌ Dismiss", callback_data="cb_dismiss")]]
                                     await app.bot.send_message(chat_id=uid, text=f"❌ **Copy Trade Failed (Sell {token_sym})**\nReason: {err_msg}", reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
                                     
                     except Exception as inner_e:
@@ -1108,15 +597,13 @@ async def cmd_start(u, ctx):
     await show_main_menu(u.message, u.effective_user.id, username=u.effective_user.username)
 
 async def cmd_register(u, ctx, is_callback=False):
-    users = load_users()
     uid = str(u.effective_user.id)
     username = u.effective_user.username
     msg = u.callback_query.message if is_callback else u.message
     kb = [[InlineKeyboardButton("🔙 Back to Menu", callback_data="cb_menu")]]
     rm = InlineKeyboardMarkup(kb)
-    
-    # Check if they already have a wallet (this handles existing proxy wallets)
-    if auto_link_wallet(uid, username):
+
+    if auto_link_wallet(uid, username=username):
         users = load_users()
         w = users[uid]
         bsc_addr = next((a["address"] for a in w.get("address_list", []) if a["chain"] == "bsc"), "N/A")
@@ -1125,7 +612,9 @@ async def cmd_register(u, ctx, is_callback=False):
         else: await msg.reply_text(text, reply_markup=rm, parse_mode="Markdown")
         return
 
-    if not is_callback: await msg.reply_text("No existing wallet found. Creating new one...")
+    users = load_users()
+    if not is_callback:
+        await msg.reply_text("No existing wallet found. Creating new one...")
     
     # New user - create proxy wallet
     r = proxy_post("/v1/thirdParty/user/generateWallet", {"assetsName": "user_" + uid[-8:], "returnMnemonic": False})
@@ -1144,8 +633,7 @@ async def cmd_register(u, ctx, is_callback=False):
 
 async def cmd_deposit(u, ctx, is_callback=False):
     uid = str(u.effective_user.id)
-    username = u.effective_user.username
-    auto_link_wallet(uid, username)
+    auto_link_wallet(uid, username=u.effective_user.username)
     users = load_users()
     msg = u.callback_query.message if is_callback else u.message
     kb = [[InlineKeyboardButton("🔙 Back to Menu", callback_data="cb_menu")]]
@@ -1163,8 +651,7 @@ async def cmd_deposit(u, ctx, is_callback=False):
 
 async def cmd_balance(u, ctx, is_callback=False):
     uid = str(u.effective_user.id)
-    username = u.effective_user.username
-    auto_link_wallet(uid, username)
+    auto_link_wallet(uid, username=u.effective_user.username)
     users = load_users()
     msg = u.callback_query.message if is_callback else u.message
     kb = [
@@ -1178,164 +665,66 @@ async def cmd_balance(u, ctx, is_callback=False):
         if is_callback: await msg.edit_text(text, reply_markup=rm)
         else: await msg.reply_text(text, reply_markup=rm)
         return
-
-    aid = users[uid]["assets_id"]
-    bsc_addr = next((a["address"] for a in users[uid].get("address_list", []) if a["chain"] == "bsc"), None)
-    trades = load_trades()
-    user_trades = trades.get(uid, {})
-
+        
     text_loading = "Fetching on-chain portfolio..."
     if is_callback: await msg.edit_text(text_loading)
     else: msg = await msg.reply_text(text_loading)
-
-    # --- Attempt 1: On-chain holdings via Ave public API (no swap history needed) ---
-    from ave.http import api_get
-    onchain_positions = {}
-    usdt_balance = 0.0
-
-    if bsc_addr:
-        try:
-            r = await api_get("/address/walletinfo/tokens", {
-                "wallet_address": bsc_addr, "chain": "bsc",
-                "sort": "balance_usd", "sort_dir": "desc", "pageSize": 50
-            })
-            if r.status_code == 200:
-                d = r.json()
-                for t in d.get("data", []):
-                    bal = float(t.get("balance_amount") or 0)
-                    if bal <= 0: continue
-                    sym = t.get("symbol", "?")
-                    ta = t.get("token", "")
-                    onchain_positions[sym] = {
-                        "addr": ta, "bal": bal,
-                        "balance_usd": float(t.get("balance_usd") or 0)
-                    }
-                    if sym.upper() == "USDT":
-                        usdt_balance = bal
-        except Exception as e:
-            print(f"On-chain balance fetch error: {e}")
-
-    # --- Attempt 2: Swap history for P&L if no on-chain positions ---
-    positions = {}
-    if not onchain_positions:
-        r = proxy_get("/v1/thirdParty/tx/getSwapOrder", {"chain": "bsc", "assetsId": aid, "pageSize": "50", "pageNO": "0"})
-        if r.get("status") in (200, 0) and r.get("data"):
-            for o in r["data"]:
-                if o.get("status") != "confirmed": continue
-                swap_type = o.get("swapType", "buy")
-                if swap_type == "buy":
-                    sym = o.get("outTokenSymbol", "?")
-                    ta = o.get("outTokenAddress")
-                    bal_chg = float(o.get("outAmount", "0")) / 1e18
-                    usd_spent = float(o.get("txPriceUsd", "0")) * bal_chg
-                    if sym not in positions: positions[sym] = {"addr": ta, "bal": 0.0, "invested": 0.0}
-                    positions[sym]["bal"] += bal_chg
-                    positions[sym]["invested"] += usd_spent
-                else:
-                    sym = o.get("inTokenSymbol", "?")
-                    ta = o.get("inTokenAddress")
-                    bal_chg = float(o.get("inAmount", "0")) / 1e18
-                    usd_received = float(o.get("txPriceUsd", "0")) * bal_chg
-                    if sym in positions:
-                        positions[sym]["bal"] -= bal_chg
-                        positions[sym]["invested"] -= usd_received
-                        if positions[sym]["invested"] < 0: positions[sym]["invested"] = 0
-
-    lines = ["📊 *Portfolio - BSC*\\n"]
-    total_invested = 0.0
-    total_current = 0.0
-
-    # Build display list from whichever source has data
-    display_positions = {}
-    if onchain_positions:
-        display_positions = onchain_positions
-    elif positions:
-        display_positions = positions
-
-    if not display_positions:
-        # No holdings anywhere — show USDT balance at minimum + prompt to deposit
-        if usdt_balance > 0:
-            lines = ["📊 *Portfolio - BSC*\\n"]
-            lines.append(f"💵 *USDT*: {usdt_balance:,.2f}")
-            lines.append(f"\\n💰 *Total Value*: ${usdt_balance:,.2f}")
-            lines.append("\\n_Other tokens will appear here after your first swap._")
-        else:
-            await msg.edit_text(
-                "📊 *Portfolio - BSC*\\n\\nNo holdings yet.\\n"
-                "Deposit USDT to your BSC wallet address to start trading.",
-                reply_markup=rm, parse_mode="Markdown"
-            )
-            return
-
-    for sym, p in display_positions.items():
-        bal = p.get("bal", 0)
-        if isinstance(bal, float) and bal < 0.0001: continue
-
-        if onchain_positions:
-            # On-chain mode: we have balance_usd directly
-            curr_value = p.get("balance_usd", 0)
-            lines.append(f"*{sym}*: {bal:,.4f}")
-            lines.append(f"  Val: ${curr_value:,.2f}")
-            total_current += curr_value
-            # No invested/P&L data in on-chain mode
-            # Show TP/SL if active
-            ta = p.get("addr", "")
-            if ta in user_trades and user_trades[ta].get("status") == "active":
-                t = user_trades[ta]
-                lines.append(f"  ⚡ TP: +{t['tp_pct']}% | SL: {t['sl_pct']}%")
-            sell_cb = f"sell_{ta}_{sym}"
-            sell_button = InlineKeyboardButton(f"⚡ Sell {sym}", callback_data=sell_cb)
-            kb_sell = [[sell_button]]
-            lines.append(f"  ⚡ Sell {sym} → tap button below")
-            # Store button for this position
-            sell_buttons.append(sell_button)
-            lines.append("")
-        else:
-            # Swap history mode: calculate P&L
-            if bal < 0.0001: continue
-            invested = p.get("invested", 0)
-            total_invested += invested
-            pr = await api_get(f"/tokens/{p['addr']}-bsc")
-            curr_price = 0.0
-            if pr.status_code == 200 and pr.json().get("data"):
-                curr_price = float(pr.json()["data"].get("token", {}).get("current_price_usd", 0))
-            curr_value = bal * curr_price
-            total_current += curr_value
-            pnl_usd = curr_value - invested
-            pnl_pct = (pnl_usd / invested * 100) if invested > 0 else 0
-            sign = "🟢 +" if pnl_usd >= 0 else "🔴 "
-            lines.append(f"*{sym}*: {round(bal, 4)}")
-            lines.append(f"  Val: ${curr_value:.2f} | Inv: ${invested:.2f}")
-            lines.append(f"  PNL: {sign}${abs(pnl_usd):.2f} ({pnl_pct:+.2f}%)")
-            ta = p.get("addr", "")
-            if ta in user_trades and user_trades[ta].get("status") == "active":
-                t = user_trades[ta]
-                lines.append(f"  ⚡ TP: +{t['tp_pct']}% | SL: {t['sl_pct']}%")
-            sell_cb = f"sell_{ta}_{sym}"
-            sell_button = InlineKeyboardButton(f"⚡ Sell {sym}", callback_data=sell_cb)
-            kb_sell = [[sell_button]]
-            lines.append(f"  ⚡ Sell {sym} → tap button below")
-            # Store button for this position
-            sell_buttons.append(sell_button)
-            lines.append("")
-
-    if onchain_positions and total_current == 0 and usdt_balance > 0:
-        total_current = usdt_balance
-
-    if total_current == 0 and not onchain_positions:
-        await msg.edit_text("No active positions.", reply_markup=rm)
+    
+    aid = users[uid]["assets_id"]
+    addr_list = users[uid].get("address_list", [])
+    bsc_addr = next((a["address"] for a in addr_list if a.get("chain") == "bsc" and a.get("address", "").startswith("0x")), None)
+    if not bsc_addr and addr_list:
+        bsc_addr = next((a["address"] for a in addr_list if a.get("address", "").startswith("0x")), None)
+    
+    if not bsc_addr:
+        await msg.edit_text("No BSC wallet address found. Use /register to create one.", reply_markup=rm)
         return
-
-    if onchain_positions:
-        lines.append(f"💰 *Total Value*: ${total_current:,.2f}")
-    else:
-        tot_pnl_usd = total_current - total_invested
-        tot_pnl_pct = (tot_pnl_usd / total_invested * 100) if total_invested > 0 else 0
-        tot_sign = "🟢 +" if tot_pnl_usd >= 0 else "🔴 "
-        lines.append(f"💰 *Total Value*: ${total_current:.2f}")
-        lines.append(f"📈 *Total PNL*: {tot_sign}${abs(tot_pnl_usd):.2f} ({tot_pnl_pct:+.2f}%)")
-
-    await msg.edit_text("\\n".join(lines), reply_markup=rm, parse_mode="Markdown")
+    
+    r = proxy_get("/address/walletinfo/tokens", {
+        "wallet_address": bsc_addr,
+        "chain": "bsc",
+        "sort": "balance_usd",
+        "sort_dir": "desc",
+        "pageSize": "20"
+    })
+    
+    if r.get("status") != 1 or not r.get("data"):
+        await msg.edit_text("No on-chain holdings found for this wallet.", reply_markup=rm)
+        return
+    
+    from ave.http import api_get
+    trades = load_trades()
+    user_trades = trades.get(uid, {})
+    
+    lines = ["📊 *On-Chain Portfolio - BSC*\n"]
+    total_usd = 0.0
+    
+    for tok in r["data"]:
+        bal = float(tok.get("balance_amount", 0) or 0)
+        if bal <= 0: continue
+        sym = tok.get("symbol", "?")
+        tok_addr = tok.get("token", "")
+        value = float(tok.get("balance_usd", 0) or 0)
+        total_usd += value
+        unreal_pnl = float(tok.get("unrealized_profit", 0) or 0)
+        pnl_pct = float(tok.get("total_profit_ratio", 0) or 0)
+        pnl_sign = "🟢 +" if unreal_pnl >= 0 else "🔴 "
+        
+        lines.append(f"*{sym}*: {round(bal, 4)}")
+        lines.append(f"  Val: ${value:.2f} | P/L: {pnl_sign}{abs(unreal_pnl):.2f} ({pnl_pct:+.1f}%)")
+        
+        if tok_addr in user_trades and user_trades[tok_addr].get("status") == "active":
+            tk = user_trades[tok_addr]
+            lines.append(f"  ⚡ TP: +{tk['tp_pct']}% | SL: {tk['sl_pct']}%")
+        lines.append("")
+    
+    if total_usd == 0:
+        await msg.edit_text("No holdings with balance > 0.", reply_markup=rm)
+        return
+    
+    lines.append(f"💰 *Total Value*: ${total_usd:.2f}")
+    
+    await msg.edit_text("\n".join(lines), reply_markup=rm, parse_mode="Markdown")
 
 async def cmd_signal(u, ctx, is_callback=False):
     msg = u.callback_query.message if is_callback else u.message
@@ -1405,11 +794,6 @@ async def cmd_signal(u, ctx, is_callback=False):
     if not signals:
         await msg.edit_text("No signals above 60% confidence right now. Try again later.", reply_markup=rm)
         return
-
-    # Store signals to history (so dashboard can show them)
-    for s in signals[:8]:
-        _store_signal(s["sym"], s["chain"], "buy", s["conf"], s["price"], duration_hrs=4)
-
     lines = [f"🔔 {len(signals)} Signals Found (≥60% confidence)\n"]
     buttons = []
     for s in signals[:8]:
@@ -1427,33 +811,10 @@ async def cmd_signal(u, ctx, is_callback=False):
     new_rm = InlineKeyboardMarkup(buttons)
     
     await msg.edit_text("\n".join(lines), reply_markup=new_rm, parse_mode="Markdown")
-    
-    # Store signals in DB and broadcast to channel
-    for s in signals[:8]:
-        try:
-            _store_signal(s["sym"], s["chain"], "buy", s["conf"], s["price"], duration_hrs=4)
-        except Exception as e:
-            print(f"_store_signal error: {e}")
-    if signals:
-        channel_msg = "🔔 *Signal Alert — BSC*\n\n"
-        for s in signals[:5]:
-            emoji = "🟢 BUY" if s["chg"] < -3 else "🔴 BUY"
-            channel_msg += f"{emoji} [{s["conf"]:.0f}%] *{s["sym"]}*\n"
-            channel_msg += f"Price: `${s["price"]:.8f}` | 24h: {s["chg"]:+.1f}%\n"
-            channel_msg += f"Liq: ${s["liq"]:,.0f}\n\n"
-        channel_msg += "_Powered by Avegram_"
-        try:
-            if _bot_app:
-                asyncio.get_event_loop().run_in_executor(
-                    None, lambda: _bot_app.bot.send_message(chat_id=ALERT_CHANNEL, text=channel_msg, parse_mode="Markdown")
-                )
-        except Exception as e:
-            print(f"Channel broadcast error: {e}")
 
 async def cmd_trade(u, ctx, is_callback=False):
     uid = str(u.effective_user.id)
-    username = u.effective_user.username
-    auto_link_wallet(uid, username)
+    auto_link_wallet(uid, username=u.effective_user.username)
     users = load_users()
     msg = u.callback_query.message if is_callback else u.message
     kb = [[InlineKeyboardButton("🔙 Back to Menu", callback_data="cb_menu")]]
@@ -1489,7 +850,7 @@ async def cmd_trade(u, ctx, is_callback=False):
     usdt = "0x55d398326f99059fF775485246999027B3197955"
     await msg.edit_text("Getting quote for " + str(amount) + " USDT to " + sym + "...")
     
-    qr = proxy_post("/v1/thirdParty/tx/sendSwapOrder", {"chain": "bsc", "assetsId": aid, "inTokenAddress": usdt, "outTokenAddress": ta, "inAmount": str(int(amount * 1e18)), "swapType": "buy", "slippage": "500"})
+    qr = proxy_post("/v1/thirdParty/tx/sendSwapOrder", {"chain": "bsc", "assetsId": aid, "inTokenAddress": usdt, "outTokenAddress": ta, "inAmount": str(int(amount * 1e18)), "slippage": "500"})
     if qr.get("status") not in (200, 0):
         err_msg = qr.get('msg', 'Unknown Error')
         kb = [[InlineKeyboardButton("🔄 Retry Trade", callback_data=f"retry_bsc_{aid}_{usdt}_{ta}_{int(amount * 1e18)}_buy"), InlineKeyboardButton("❌ Dismiss", callback_data="cb_dismiss")]]
@@ -1527,6 +888,7 @@ async def cmd_topwallets(u, ctx, is_callback=False):
         lines.append(str(i) + ". " + addr_short + " | 900%+: " + str(w.get("profit_above_900_percent_num", 0)) + " | 300-900%: " + str(w.get("profit_300_900_percent_num", 0)))
         lines.append("   `/track " + addr + "`")
     
+    # Add a generic back button
     await msg.edit_text("\n".join(lines), reply_markup=rm, parse_mode="Markdown")
 
 async def cmd_track(u, ctx, is_callback=False):
@@ -1554,7 +916,7 @@ async def cmd_track(u, ctx, is_callback=False):
         for t in d["data"][:6]:
             bal = float(t.get("balance_amount", 0) or 0)
             if bal <= 0: continue
-            lines.append(t.get("symbol", "?") + ": " + str(round(bal, 4)) + " | P/L: " + str(round(float(t.get("profit_pct", 0)), 1)) + "%")
+            lines.append(t.get("symbol", "?") + ": " + str(round(bal, 4)) + " | P/L: " + str(round(float(t.get("profit_pct", 0), 1))) + "%")
     else: lines.append("No holdings found")
     
     # Add Copy Trade button
@@ -1573,7 +935,10 @@ async def cmd_help(u, ctx, is_callback=False):
     kb = [[InlineKeyboardButton("🔙 Back to Menu", callback_data="cb_menu")]]
     rm = InlineKeyboardMarkup(kb)
     text = (
-        "/register /deposit /balance /quote SYM [AMT] /signal /trade SYM AMT /topwallets [chain] /track ADDRESS /help\n\n"
+        "Commands:\n"
+        "register · deposit · balance · quote SYM [AMT]\n"
+        "signal · trade SYM AMT · topwallets [chain]\n"
+        "track ADDRESS · help\n\n"
         "ENV Status:\n"
         f"TELEGRAM_BOT_TOKEN: {'✅ set' if BOT_TOKEN else '❌ missing'}\n"
         f"AVE_API_KEY: {'✅ set' if AVE_API_KEY else '❌ missing'}\n"
@@ -1581,459 +946,95 @@ async def cmd_help(u, ctx, is_callback=False):
         f"API_PLAN: {API_PLAN or 'pro'}\n\n"
         "Powered by Ave Cloud API"
     )
-    if is_callback: await msg.edit_text(text, reply_markup=rm, parse_mode="Markdown")
-    else: await msg.reply_text(text, reply_markup=rm, parse_mode="Markdown")
+    if is_callback: await msg.edit_text(text, reply_markup=rm)
+    else: await msg.reply_text(text, reply_markup=rm)
 
-async def cmd_analyse(u, ctx, is_callback=False):
-    """Analyse a held token — gives buy/hold/sell recommendation based on on-chain data."""
-    msg = u.callback_query.message if is_callback else u.message
-    kb = [[InlineKeyboardButton("🔙 Back to Menu", callback_data="cb_menu")]]
-    rm = InlineKeyboardMarkup(kb)
-
+async def cmd_quote(u, ctx):
+    """Quote price for a token - shows estimated output for a given input amount"""
     if not ctx.args:
-        await u.message.reply_text(
-            "Usage: `/analyse SYMBOL`\n\nExample: `/analyse PEPE`\n\n Analyses a token you hold and gives a buy/hold/sell rating.",
-            reply_markup=rm, parse_mode="Markdown"
-        )
+        await u.message.reply_text("Usage: /quote SYMBOL [AMOUNT]\nExample: /quote ASTER 10\nShows quote for converting 10 USDT to ASTER")
         return
 
     sym = ctx.args[0].upper()
-    loading_msg = await u.message.reply_text(f"🔍 Analysing {sym}...")
+    amount = float(ctx.args[1]) if len(ctx.args) > 1 else 10.0  # default 10 USDT
+
+    await u.message.reply_text(f"Getting quote for {amount} USDT → {sym}...")
+
+    # Find token address
+    from ave.http import api_get
+
+    sr = await api_get("/tokens", {"keyword": sym, "limit": 5, "chain": "bsc"})
+    tok_data = sr.json().get("data", [])
+    if not tok_data:
+        # Try ETH chain
+        sr = await api_get("/tokens", {"keyword": sym, "limit": 5, "chain": "eth"})
+        tok_data = sr.json().get("data", [])
+
+    if not tok_data:
+        await u.message.reply_text(f"Token '{sym}' not found on BSC or ETH.")
+        return
+
+    # Find token with matching symbol
+    ta = None
+    tok_chain = "bsc"
+    for t in tok_data:
+        if t.get("symbol", "").upper() == sym.upper():
+            ta = t.get("token", "").split("-")[0]
+            tok_chain = t.get("chain", "bsc")
+            break
+    if not ta:
+        ta = tok_data[0].get("token", "").split("-")[0]
+        tok_chain = tok_data[0].get("chain", "bsc")
+
+    # USDT address on BSC
+    usdt_addr = "0x55d398326f99059fF775485246999027B3197955"
+    # USDT on ETH
+    usdt_addr_eth = "0xdAC17F958D2ee523a2206206994597C13D831ec7"
+
+    in_token = usdt_addr_eth if tok_chain == "eth" else usdt_addr
+    chain = tok_chain
+
+    # Get quote - inAmount in smallest unit (USDT has 6 decimals for BSC-USDT, 6 for ETH too)
+    in_amount_smallest = str(int(amount * 1e18))  # 18 decimals for BSC USDT
 
     try:
-        from ave.http import api_get
-
-        # Step 1: Find token address
-        sr = await api_get("/tokens", {"keyword": sym, "limit": 5, "chain": "bsc"})
-        tok_data = sr.json().get("data", [])
-        if not tok_data:
-            sr2 = await api_get("/tokens", {"keyword": sym, "limit": 5, "chain": "eth"})
-            tok_data = sr2.json().get("data", [])
-
-        if not tok_data:
-            await loading_msg.edit_text(f"Token '{sym}' not found.", reply_markup=rm)
-            return
-
-        # Use exact symbol match
-        ta = None
-        tok_chain = "bsc"
-        for t in tok_data:
-            if t.get("symbol", "").upper() == sym.upper():
-                ta = t.get("token", "").split("-")[0]
-                tok_chain = t.get("chain", "bsc")
-                break
-        if not ta:
-            ta = tok_data[0].get("token", "").split("-")[0]
-            tok_chain = tok_data[0].get("chain", "bsc")
-
-        # Step 2: Fetch token price data and contract risk data concurrently
-        pr, cr = await asyncio.gather(
-            api_get(f"/tokens/{ta}-{tok_chain}"),
-            api_get(f"/contracts/{ta}-{tok_chain}"),
-        )
-
-        pd = pr.json().get("data", {}) if pr.status_code == 200 else {}
-        cd = cr.json().get("data", {}) if cr.status_code == 200 else {}
-
-        token_info = pd.get("token", {})
-        current_price = float(token_info.get("current_price_usd", 0))
-        liquidity = float(token_info.get("tvl") or token_info.get("main_pair_tvl") or 0)
-        volume_24h = float(token_info.get("tx_volume_u_24h") or 0)
-        mc = float(token_info.get("market_cap") or 0)
-        price_change_24h = float(token_info.get("price_change_24h") or 0)
-        price_change_1d = float(token_info.get("price_change_1d") or 0)
-        holders = int(token_info.get("holders") or 0)
-
-        ai_report = cd.get("ai_report", {})
-        risks = ai_report.get("risk", [])
-        honeypot_flag = cd.get("is_honeypot") == 1
-
-        # Step 3: Compute scores
-        scores = []
-        explanations = []
-
-        # Liquidity score (0-100)
-        if liquidity > 1_000_000:
-            liq_score, liq_label = 90, "Excellent"
-        elif liquidity > 200_000:
-            liq_score, liq_label = 70, "Good"
-        elif liquidity > 50_000:
-            liq_score, liq_label = 50, "Moderate"
-        elif liquidity > 10_000:
-            liq_score, liq_label = 30, "Low"
-        else:
-            liq_score, liq_label = 10, "Very Low"
-        scores.append(("Liquidity", liq_score, liq_label))
-        explanations.append(f"  Liquidity: ${liquidity:,.0f} — {liq_label}")
-
-        # Volume momentum (0-100)
-        if volume_24h > 100_000:
-            vol_score, vol_label = 90, "Very Active"
-        elif volume_24h > 20_000:
-            vol_score, vol_label = 70, "Active"
-        elif volume_24h > 5_000:
-            vol_score, vol_label = 50, "Moderate"
-        else:
-            vol_score, vol_label = 20, "Thin"
-        scores.append(("Volume 24h", vol_score, vol_label))
-        explanations.append(f"  Volume: ${volume_24h:,.0f}/24h — {vol_label}")
-
-        # Price momentum (0-100)
-        if price_change_24h > 10:
-            mom_score, mom_label = 85, "Strong Uptick"
-        elif price_change_24h > 3:
-            mom_score, mom_label = 70, "Bullish"
-        elif price_change_24h > -3:
-            mom_score, mom_label = 55, "Neutral"
-        elif price_change_24h > -10:
-            mom_score, mom_label = 35, "Bearish"
-        else:
-            mom_score, mom_label = 15, "Heavy Selloff"
-        scores.append(("Price Momentum", mom_score, mom_label))
-        explanations.append(f"  Momentum: {price_change_24h:+.1f}%/24h — {mom_label}")
-
-        # Honeypot / contract risk (0-100, inverted to score)
-        if honeypot_flag:
-            risk_score, risk_label = 0, "HONEYPOT ⚠️"
-        elif risks:
-            critical = sum(1 for r in risks if r.get("risk_level", 0) < 0 and not r.get("risk_removed"))
-            if critical >= 3:
-                risk_score, risk_label = 15, "Very High Risk"
-            elif critical >= 1:
-                risk_score, risk_label = 35, "High Risk"
-            else:
-                risk_score, risk_label = 65, "Moderate Risk"
-        else:
-            risk_score, risk_label = 80, "Clean"
-        scores.append(("Contract Safety", risk_score, risk_label))
-        explanations.append(f"  Contract: {risk_label}")
-
-        # Holder count (0-100)
-        if holders > 10000:
-            hold_score, hold_label = 90, "Widely Held"
-        elif holders > 1000:
-            hold_score, hold_label = 70, "Good Distribution"
-        elif holders > 100:
-            hold_score, hold_label = 50, "Moderate"
-        else:
-            hold_score, hold_label = 20, "Low Holders"
-        scores.append(("Holders", hold_score, hold_label))
-        explanations.append(f"  Holders: {holders:,} — {hold_label}")
-
-        # Weighted total score (out of 100)
-        total = (
-            scores[0][1] * 0.25 +   # Liquidity
-            scores[1][1] * 0.20 +   # Volume
-            scores[2][1] * 0.25 +   # Momentum
-            scores[3][1] * 0.20 +   # Safety
-            scores[4][1] * 0.10     # Holders
-        )
-
-        if total >= 80:
-            verdict, emoji = "BUY 🟢", "🟢"
-        elif total >= 60:
-            verdict, emoji = "HOLD 🟡", "🟡"
-        elif total >= 40:
-            verdict, emoji = "HOLD / SELL ⚠️", "🟡"
-        else:
-            verdict, emoji = "SELL 🔴", "🔴"
-
-        # Cap for honeypot
-        if honeypot_flag:
-            verdict, emoji = "SELL 🔴", "🔴"
-            total = min(total, 25)
-
-        # Build response
-        lines = [
-            f"📊 *Token Analysis — {sym}*",
-            f"",
-            f"💰 Price: `${current_price:.8f}`",
-            f"   MC: ${mc:,.0f} | Liq: ${liquidity:,.0f}",
-            f"",
-            f"*Scores:*"
-        ]
-
-        for name, score, label in scores:
-            bar = "▓" * round(score / 10) + "░" * (10 - round(score / 10))
-            lines.append(f"  {name}: {bar} {score}/100 ({label})")
-
-        lines.extend([
-            "",
-            f"*Overall Score: {total:.0f}/100*",
-            f"{verdict}",
-            "",
-            f"🔗 https://pro.ave.ai/token/{ta}-{tok_chain}"
-        ])
-
-        if honeypot_flag:
-            lines.insert(2, "⚠️ *HONEYPOT DETECTED — DO NOT BUY*")
-
-        await loading_msg.edit_text("\n".join(lines), reply_markup=rm, parse_mode="Markdown")
-
+        qr = proxy_post("/v1/thirdParty/chainWallet/getAmountOut", {
+            "chain": chain,
+            "inAmount": in_amount_smallest,
+            "inTokenAddress": in_token,
+            "outTokenAddress": ta,
+        })
     except Exception as e:
-        await loading_msg.edit_text(f"Analysis failed: {e}\n\nTry again or use `/analyse PEPE` etc.", reply_markup=rm)
+        await u.message.reply_text(f"Quote request failed: {e}")
+        return
 
+    if qr.get("status") not in (200, 0) or not qr.get("data"):
+        await u.message.reply_text(f"Quote failed: {qr.get('msg', 'Unknown error')}")
+        return
 
+    d = qr["data"]
+    estimate_out = int(d.get("estimateOut", 0))
+    decimals = d.get("decimals", 18)
+    spender = d.get("spender", "N/A")
 
-def _store_signal(sym, chain, signal_type, conf, entry_price, duration_hrs=4):
-    """Store a new signal in history."""
-    import time
-    now = time.time()
-    history = load_signal_history()
-    sid = f"{sym}_{int(now * 1000)}"
-    history.append({
-        "signal_id": sid,
-        "symbol": sym.upper(),
-        "chain": chain,
-        "signal_type": signal_type,  # "buy" or "sell"
-        "confidence": conf,
-        "entry_price": entry_price,
-        "duration_hrs": duration_hrs,
-        "created_at": now,
-        "expiry_time": now + (duration_hrs * 3600),
-        "status": "active",
-        "close_price": None,
-        "pnl_pct": None
-    })
-    save_signal_history(history)
-    return sid
-
-
-async def cmd_analytics(u, ctx, is_callback=False):
-    """Show signal performance analytics."""
-    from ave.http import api_get
-    msg = u.callback_query.message if is_callback else u.message
-    kb = [[InlineKeyboardButton("🔄 Refresh", callback_data="cb_analytics")],
-          [InlineKeyboardButton("🔙 Back to Menu", callback_data="cb_menu")]]
-    rm = InlineKeyboardMarkup(kb)
-
-    stats = db_get_signal_stats()
-    history = load_signal_history()
-    active = [s for s in history if s["status"] == "active"]
-    closed_count = stats.get("closed", 0) or 0
-    won_count = stats.get("won", 0) or 0
-    lost_count = stats.get("lost", 0) or 0
-    avg_pnl_val = stats.get("avg_pnl") or 0
-    best_pnl = stats.get("best") or 0
-    worst_pnl = stats.get("worst") or 0
-
-    win_rate = won_count / closed_count * 100 if closed_count else 0
-    total_return = sum(s["pnl_pct"] or 0 for s in history if s["status"] in ("won", "lost"))
+    # Convert to human readable
+    # The API returns estimateOut in the token's display unit (not smallest unit like wei)
+    # ASTER has 18 decimals on-chain, but the API returns already normalized values
+    # Confirmed: 14472927 estimate for 10 USDT → 14.472927 ASTER @ $0.69 ≈ $10 ✓
+    token_amount = estimate_out / (10 ** 6)  # normalize assuming 6dp display unit
+    price_usd = amount / token_amount if token_amount > 0 else 0
 
     lines = [
-        "📊 *Signal Analytics*\n",
-        f"_All time (since first signal)_\n",
+        f"💱 Quote: {amount} USDT → {sym}",
+        f"Chain: {chain.upper()}",
+        f"Estimated {sym} out: {token_amount:,.6f}",
+        f"Price: ${price_usd:,.6f} per {sym}",
+        f"Token: `{ta}`",
+        f"Spender: `{spender[:20]}...`" if len(spender) > 20 else f"Spender: `{spender}`",
         "",
-        f"*Overview*",
-        f"  Total Signals: {len(history)}",
-        f"  Active: {len(active)} | Closed: {len(closed)}",
-        "",
-        f"*Win Rate*",
-        f"  🟢 Won: {len(won)} | 🔴 Lost: {len(lost)}",
-        f"  Win Rate: {win_rate:.1f}%",
-        "",
-        f"*Avg Performance*",
-        f"  Avg Win: +{avg_pnl:.2f}%",
-        f"  Avg Loss: {avg_loss:.2f}%",
-        f"  Total Return: {total_return:+.2f}%",
+        f"Link: https://pro.ave.ai/token/{ta}-{chain}"
     ]
-
-    if closed:
-        if best_pnl != 0 or worst_pnl != 0:
-            cur = conn.cursor() if 'conn' in dir() else None
-            try:
-                cur.execute("SELECT symbol, pnl_pct FROM signal_history WHERE status='closed' AND pnl_pct IS NOT NULL ORDER BY pnl_pct DESC LIMIT 1") if cur else None
-                best_row = cur.fetchone() if cur else None
-                cur.execute("SELECT symbol, pnl_pct FROM signal_history WHERE status='closed' AND pnl_pct IS NOT NULL ORDER BY pnl_pct ASC LIMIT 1") if cur else None
-                worst_row = cur.fetchone() if cur else None
-            finally:
-                if cur: conn.close()
-            lines += [
-                "",
-                f"*Best Signal*",
-                f"  {best_row[0] if best_row else 'N/A'}: {best_pnl:+.2f}%",
-                "",
-                f"*Worst Signal*",
-                f"  {worst_row[0] if worst_row else 'N/A'}: {worst_pnl:+.2f}%",
-            ]
-
-    lines += ["", "_Refreshes every 5 minutes_"]
-    await msg.edit_text("\n".join(lines), reply_markup=rm, parse_mode="Markdown")
-
-
-async def monitor_signal_performance(app: Application):
-    """Background task — close expired signals and update P&L."""
-    from ave.http import api_get
-    import time
-
-    while True:
-        try:
-            history = load_signal_history()
-            changed = False
-            now = time.time()
-
-            for s in history:
-                if s["status"] != "active":
-                    continue
-                if now < s["expiry_time"]:
-                    continue
-
-                # Signal expired — fetch final price
-                ta = s.get("token_addr", "")
-                chain = s.get("chain", "bsc")
-                sym = s["symbol"]
-                entry = s["entry_price"]
-
-                if ta:
-                    try:
-                        pr = await api_get(f"/tokens/{ta}-{chain}")
-                        if pr.status_code == 200 and pr.json().get("data"):
-                            curr_price = float(pr.json()["data"].get("token", {}).get("current_price_usd", 0))
-                        else:
-                            curr_price = 0
-                    except:
-                        curr_price = 0
-                else:
-                    curr_price = 0
-
-                if curr_price > 0 and entry > 0:
-                    pnl_pct = ((curr_price - entry) / entry) * 100
-                else:
-                    pnl_pct = 0
-
-                s["status"] = "won" if pnl_pct > 0 else "lost"
-                s["close_price"] = curr_price
-                s["pnl_pct"] = round(pnl_pct, 2)
-                s["closed_at"] = now
-                changed = True
-
-                # Notify channel
-                emoji = "🟢" if s["status"] == "won" else "🔴"
-                conf = s.get("confidence", 0)
-                duration = s.get("duration_hrs", 4)
-                lines = [
-                    f"📡 *Signal Closed — {sym}*\n",
-                    f"{emoji} Result: *{s['status'].upper()}* ({pnl_pct:+.2f}%)\n",
-                    f"Entry: ${entry:.8f} → Close: ${curr_price:.8f}\n",
-                    f"Confidence: {conf:.0f}% | Duration: {duration}h\n",
-                    f"Time: {duration}h | Signal ID: `{s['signal_id']}`",
-                ]
-                try:
-                    await app.bot.send_message(
-                        chat_id=ALERT_CHANNEL,
-                        text="\n".join(lines),
-                        parse_mode="Markdown"
-                    )
-                except Exception:
-                    pass
-
-            if changed:
-                save_signal_history(history)
-
-        except Exception as e:
-            print(f"Signal Performance Monitor error: {e}")
-
-        await asyncio.sleep(60)
-
-
-async def monitor_signal_alerts(app: Application):
-    """Background scanner — pushes 85%+ BUY signals to all users on BSC."""
-    seen_signals = set()
-    ALERT_THRESHOLD = 85
-    SCAN_INTERVAL = 120  # seconds
-
-    while True:
-        try:
-            users = load_users()
-            if not users:
-                await asyncio.sleep(SCAN_INTERVAL)
-                continue
-
-            # Collect all registered user IDs
-            user_ids = [uid for uid, u in users.items() if u.get("assets_id")]
-
-            # Fetch live signals
-            signals_url = "https://data.ave-api.xyz/v2/signals/public/list?chain=bsc&pageSize=50&pageNO=1"
-            req = urllib.request.Request(
-                signals_url,
-                headers={"X-API-KEY": AVE_API_KEY}
-            )
-            r = await asyncio.get_event_loop().run_in_executor(
-                None, lambda: urllib.request.urlopen(req, timeout=10)
-            )
-            d = json.loads(r.read())
-
-            new_signals = []
-            for s in d.get("data", []):
-                if s.get("signal_type") != "buy":
-                    continue
-                conf = float(s.get("confidence", 0) or 0)
-                if conf < ALERT_THRESHOLD:
-                    continue
-                ta = s.get("token", "")
-                a = ta.split("-")[0] if "-" in ta else ta
-                if not a or a in seen_signals:
-                    continue
-                seen_signals.add(a)
-                new_signals.append({
-                    "conf": conf,
-                    "sym": s.get("symbol", "?"),
-                    "addr": a,
-                    "price": float(s.get("current_price", 0) or 0),
-                    "chg_24h": float(s.get("price_change_24h", 0) or 0),
-                    "token_addr": ta,
-                })
-
-            if not new_signals:
-                await asyncio.sleep(SCAN_INTERVAL)
-                continue
-
-            for sig in new_signals:
-                # Build alert message
-                d = "🟢 BUY" if sig["chg_24h"] < -3 else "🔴 BUY"
-                msg = (
-                    f"🔔 *HIGH-CONFIDENCE BUY SIGNAL*\n\n"
-                    f"{d} [{sig['conf']:.0f}%] *{sig['sym']}*\n"
-                    f"Price: `${sig['price']:.8f}` | 24h: {sig['chg_24h']:+.1f}%\n\n"
-                    f"Chain: BSC\n"
-                    f"Token: `{sig['addr']}`"
-                )
-
-                # Inline auto-trade button
-                cb_data = f"auto_bsc_{sig['addr'][:10]}_{sig['sym']}_{sig['price']:.8f}"
-                kb = [
-                    [InlineKeyboardButton(f"⚡ Auto-Trade {sig['sym']} (TP/SL)", callback_data=cb_data)],
-                    [InlineKeyboardButton(f"📊 Analyse {sig['sym']}", callback_data=f"cb_analyse_{sig['sym']}")]
-                ]
-                rm = InlineKeyboardMarkup(kb)
-
-                # Store signal in history for tracking
-                _store_signal(sig["sym"], "bsc", "buy", sig["conf"], sig["price"], duration_hrs=4)
-
-                # Update message with expiry info
-                msg = (
-                    f"🔔 *HIGH-CONFIDENCE BUY SIGNAL*\n\n"
-                    f"{d} [{sig['conf']:.0f}%] *{sig['sym']}*\n"
-                    f"Price: `${sig['price']:.8f}` | 24h: {sig['chg_24h']:+.1f}%\n\n"
-                    f"⏱️ Track P&L for 4h → result posted when expired\n\n"
-                    f"Chain: BSC | Token: `{sig['addr']}`"
-                )
-
-                # Broadcast to channel once
-                try:
-                    await app.bot.send_message(
-                        chat_id=ALERT_CHANNEL,
-                        text=msg,
-                        reply_markup=rm,
-                        parse_mode="Markdown"
-                    )
-                except Exception as e:
-                    print(f"Channel broadcast failed: {e}")
-
-        except Exception as e:
-            print(f"Signal Alert Monitor error: {e}")
-
-        await asyncio.sleep(SCAN_INTERVAL)
+    await u.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
 def main():
@@ -2041,9 +1042,9 @@ def main():
     app = Application.builder().token(BOT_TOKEN).build()
     for cmd, fn in [
         ("start", cmd_start), ("register", cmd_register), ("deposit", cmd_deposit),
-        ("balance", cmd_balance), ("signal", cmd_signal),
+        ("balance", cmd_balance), ("quote", cmd_quote), ("signal", cmd_signal),
         ("trade", cmd_trade), ("topwallets", cmd_topwallets), ("track", cmd_track),
-        ("help", cmd_help), ("analyse", cmd_analyse), ("analytics", cmd_analytics)
+        ("help", cmd_help)
     ]:
         app.add_handler(CommandHandler(cmd, fn))
     
@@ -2055,17 +1056,10 @@ def main():
     
     async def run_tasks():
         asyncio.create_task(monitor_tp_sl(app))
-        asyncio.create_task(monitor_copy_trades(app))
-        asyncio.create_task(monitor_signal_performance(app))
-        asyncio.create_task(monitor_signal_alerts(app))
     
     app.post_init = lambda a: run_tasks()
     
-    global _bot_app
-    _bot_app = app
     print("Avegram v2 running on proxy wallet mode...")
     app.run_polling()
 
 if __name__ == "__main__": main()
-
-

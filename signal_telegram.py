@@ -63,7 +63,29 @@ def proxy_post(path, body):
     req = urllib.request.Request("https://bot-api.ave.ai" + path, data=data, headers=proxy_headers("POST", path, body))
     with urllib.request.urlopen(req, timeout=15) as r: return json.loads(r.read())
 
-async def show_main_menu(message, uid, edit=False):
+def auto_link_wallet(uid_str, username=None):
+    users = load_users()
+    if uid_str in users and users[uid_str].get("assets_id"):
+        return True
+
+    r = proxy_get("/v1/thirdParty/user/getUserByAssetsId")
+    if r.get("status") in (200, 0) and r.get("data"):
+        wallets = r["data"]
+        if wallets:
+            w = wallets[0]
+            if uid_str not in users:
+                users[uid_str] = {"chain": "bsc"}
+            if username:
+                users[uid_str]["username"] = username
+            users[uid_str]["assets_id"] = w["assetsId"]
+            users[uid_str]["address_list"] = w.get("addressList", [])
+            save_users(users)
+            return True
+
+    return False
+
+async def show_main_menu(message, uid, edit=False, username=None):
+    auto_link_wallet(str(uid), username=username)
     users = load_users()
     uid_str = str(uid)
     text = "🚀 *Avegram Dashboard*\n\nPowered by Ave Cloud API"
@@ -96,7 +118,7 @@ async def handle_callback(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if str(uid) in users and "state" in users[str(uid)]:
             users[str(uid)]["state"] = None
             save_users(users)
-        await show_main_menu(query.message, uid, edit=True)
+        await show_main_menu(query.message, uid, edit=True, username=u.effective_user.username)
     elif data == "cb_register":
         await cmd_register(u, ctx, is_callback=True)
     elif data == "cb_balance":
@@ -110,6 +132,7 @@ async def handle_callback(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif data == "cb_deposit":
         await cmd_deposit(u, ctx, is_callback=True)
     elif data == "cb_withdraw":
+        auto_link_wallet(str(uid), username=u.effective_user.username)
         users = load_users()
         uid_str = str(uid)
         users[uid_str]["state"] = "awaiting_withdraw_address"
@@ -117,6 +140,7 @@ async def handle_callback(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
         keyboard = [[InlineKeyboardButton("🔙 Cancel", callback_data="cb_menu")]]
         await query.message.edit_text("💸 *Withdraw Funds*\n\nPlease paste the destination BSC address:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
     elif data == "cb_trade":
+        auto_link_wallet(str(uid), username=u.effective_user.username)
         users = load_users()
         uid_str = str(uid)
         users[uid_str]["state"] = "awaiting_trade_input"
@@ -570,40 +594,27 @@ async def monitor_copy_trades(app: Application):
         await asyncio.sleep(60)
 
 async def cmd_start(u, ctx):
-    await show_main_menu(u.message, u.effective_user.id)
+    await show_main_menu(u.message, u.effective_user.id, username=u.effective_user.username)
 
 async def cmd_register(u, ctx, is_callback=False):
-    users = load_users()
     uid = str(u.effective_user.id)
+    username = u.effective_user.username
     msg = u.callback_query.message if is_callback else u.message
     kb = [[InlineKeyboardButton("🔙 Back to Menu", callback_data="cb_menu")]]
     rm = InlineKeyboardMarkup(kb)
-    
-    # If already registered with proxy wallet, show it
-    if uid in users and users[uid].get("assets_id"):
+
+    if auto_link_wallet(uid, username=username):
+        users = load_users()
         w = users[uid]
         bsc_addr = next((a["address"] for a in w.get("address_list", []) if a["chain"] == "bsc"), "N/A")
-        text = f"Already registered\nBSC: `{bsc_addr}`"
+        text = f"✅ Proxy wallet linked and ready!\n\nBSC: `{bsc_addr}`\n\nThis wallet holds your funded USDT. Check Portfolio to see your holdings."
         if is_callback: await msg.edit_text(text, reply_markup=rm, parse_mode="Markdown")
         else: await msg.reply_text(text, reply_markup=rm, parse_mode="Markdown")
         return
-    
-    # If user exists but has no proxy wallet yet, fetch existing wallets from API
-    if uid in users and not users[uid].get("assets_id"):
-        r = proxy_get("/v1/thirdParty/user/getUserByAssetsId")
-        if r.get("status") == 200 and r.get("data"):
-            wallets = r["data"]
-            if wallets:
-                w = wallets[0]
-                users[uid]["assets_id"] = w["assetsId"]
-                users[uid]["address_list"] = w.get("addressList", [])
-                save_users(users)
-                bsc_addr = next((a["address"] for a in w.get("addressList", []) if a["chain"] == "bsc"), "N/A")
-                text = f"Proxy wallet found and linked!\n\nBSC: `{bsc_addr}`\n\nThis wallet has your funded USDT. Check Portfolio to see your holdings."
-                if is_callback: await msg.edit_text(text, reply_markup=rm, parse_mode="Markdown")
-                else: await msg.reply_text(text, reply_markup=rm, parse_mode="Markdown")
-                return
-        if not is_callback: await msg.reply_text("No existing wallet found. Creating new one...")
+
+    users = load_users()
+    if not is_callback:
+        await msg.reply_text("No existing wallet found. Creating new one...")
     
     # New user - create proxy wallet
     r = proxy_post("/v1/thirdParty/user/generateWallet", {"assetsName": "user_" + uid[-8:], "returnMnemonic": False})
@@ -613,7 +624,7 @@ async def cmd_register(u, ctx, is_callback=False):
         else: await msg.reply_text(text, reply_markup=rm)
         return
     d = r["data"]
-    users[uid] = {"assets_id": d["assetsId"], "address_list": d.get("addressList", []), "username": u.effective_user.username, "chain": "bsc"}
+    users[uid] = {"assets_id": d["assetsId"], "address_list": d.get("addressList", []), "username": username, "chain": "bsc"}
     save_users(users)
     bsc_addr = next((a["address"] for a in d.get("addressList", []) if a["chain"] == "bsc"), "N/A")
     text = f"Proxy wallet created!\n\nBSC: `{bsc_addr}`\n\nDeposit USDT BEP20 to this address, then check Portfolio."
@@ -621,8 +632,9 @@ async def cmd_register(u, ctx, is_callback=False):
     else: await msg.reply_text(text, reply_markup=rm, parse_mode="Markdown")
 
 async def cmd_deposit(u, ctx, is_callback=False):
-    users = load_users()
     uid = str(u.effective_user.id)
+    auto_link_wallet(uid, username=u.effective_user.username)
+    users = load_users()
     msg = u.callback_query.message if is_callback else u.message
     kb = [[InlineKeyboardButton("🔙 Back to Menu", callback_data="cb_menu")]]
     rm = InlineKeyboardMarkup(kb)
@@ -638,8 +650,9 @@ async def cmd_deposit(u, ctx, is_callback=False):
     else: await msg.reply_text(text, reply_markup=rm, parse_mode="Markdown")
 
 async def cmd_balance(u, ctx, is_callback=False):
-    users = load_users()
     uid = str(u.effective_user.id)
+    auto_link_wallet(uid, username=u.effective_user.username)
+    users = load_users()
     msg = u.callback_query.message if is_callback else u.message
     kb = [
         [InlineKeyboardButton("🔄 Refresh", callback_data="cb_balance")],
@@ -800,8 +813,9 @@ async def cmd_signal(u, ctx, is_callback=False):
     await msg.edit_text("\n".join(lines), reply_markup=new_rm, parse_mode="Markdown")
 
 async def cmd_trade(u, ctx, is_callback=False):
-    users = load_users()
     uid = str(u.effective_user.id)
+    auto_link_wallet(uid, username=u.effective_user.username)
+    users = load_users()
     msg = u.callback_query.message if is_callback else u.message
     kb = [[InlineKeyboardButton("🔙 Back to Menu", callback_data="cb_menu")]]
     rm = InlineKeyboardMarkup(kb)
