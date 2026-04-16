@@ -14,3 +14,9 @@ API_PLAN = os.environ.get("API_PLAN", "pro")
 
 DB_URL = os.environ.get("DATABASE_URL") or os.environ.get("POSTGRES_URL") or os.environ.get("PRISMA_DATABASE_URL") or ""
 
+# Primary test wallet (used by API server for live tests)
+PRIMARY_ASSETS_ID = os.environ.get("PRIMARY_ASSETS_ID", "")
+
+# Ensure the skill's http client runs in async server mode
+os.environ.setdefault("AVE_IN_SERVER", "1")
+
