@@ -12,17 +12,25 @@ def auto_link_wallet(uid_str, username=None):
     r = proxy_get("/v1/thirdParty/user/getUserByAssetsId")
     if r.get("status") in (200, 0) and r.get("data"):
         wallets = r["data"]
-        if wallets:
-            w = wallets[0]
-            if uid_str not in users:
-                users[uid_str] = {"chain": "bsc"}
-            if username:
-                users[uid_str]["username"] = username
-            users[uid_str]["assets_id"] = w["assetsId"]
-            users[uid_str]["address_list"] = w.get("addressList", [])
-            from ..db import save_users
-            save_users(users)
-            return True
+        if not wallets:
+            return False
+        w = None
+        # If user is already in DB, find their specific wallet
+        if uid_str in users and users[uid_str].get("assets_id"):
+            aid = users[uid_str]["assets_id"]
+            w = next((x for x in wallets if x["assetsId"] == aid), None)
+        # Otherwise use the first wallet that has a BSC address
+        if not w:
+            w = next((x for x in wallets if any(a["chain"] == "bsc" for a in x.get("addressList", []))), wallets[0])
+        if uid_str not in users:
+            users[uid_str] = {"chain": "bsc"}
+        if username:
+            users[uid_str]["username"] = username
+        users[uid_str]["assets_id"] = w["assetsId"]
+        users[uid_str]["address_list"] = w.get("addressList", [])
+        from ..db import save_users
+        save_users(users)
+        return True
 
     return False
 

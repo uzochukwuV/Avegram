@@ -425,15 +425,21 @@ async def cmd_balance(u, ctx, is_callback=False):
         await msg.edit_text("No BSC wallet address found. Use /register to create one.", reply_markup=rm)
         return
     
-    r = proxy_get("/address/walletinfo/tokens", {
+    from avegram.proxy import proxy_get as api_wallet_get
+    from ave.http import api_get as data_api_get
+    
+    r = data_api_get("/address/walletinfo/tokens", {
         "wallet_address": bsc_addr,
         "chain": "bsc",
         "sort": "balance_usd",
         "sort_dir": "desc",
         "pageSize": "20"
     })
-    
-    if r.get("status") != 1 or not r.get("data"):
+    if r.status_code != 200:
+        await msg.edit_text(f"Portfolio fetch failed (status {r.status_code}). Try again shortly.", reply_markup=rm)
+        return
+    d = r.json()
+    if d.get("status") != 1 or not d.get("data"):
         await msg.edit_text("No on-chain holdings found for this wallet.", reply_markup=rm)
         return
     
