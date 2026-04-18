@@ -159,7 +159,7 @@ _USER_RESERVED_KEYS = {"username", "chain", "assets_id", "address_list", "state"
 def load_users():
     with _get_pool().connection() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
-            cur.execute("SELECT telegram_id, username, chain, assets_id, address_list, state, session FROM users")
+            cur.execute("SELECT telegram_id::text, username, chain, assets_id, address_list, state, session FROM users")
             rows = cur.fetchall()
     users = {}
     for r in rows:
