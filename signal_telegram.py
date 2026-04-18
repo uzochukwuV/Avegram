@@ -427,18 +427,14 @@ async def cmd_balance(u, ctx, is_callback=False):
     
     from avegram.proxy import proxy_get as api_wallet_get
     from ave.http import api_get as data_api_get
-    
-    r = data_api_get("/address/walletinfo/tokens", {
+    resp = data_api_get("/address/walletinfo/tokens", {
         "wallet_address": bsc_addr,
         "chain": "bsc",
         "sort": "balance_usd",
         "sort_dir": "desc",
         "pageSize": "20"
     })
-    if r.status_code != 200:
-        await msg.edit_text(f"Portfolio fetch failed (status {r.status_code}). Try again shortly.", reply_markup=rm)
-        return
-    d = r.json()
+    d = resp.json()
     if d.get("status") != 1 or not d.get("data"):
         await msg.edit_text("No on-chain holdings found for this wallet.", reply_markup=rm)
         return
@@ -450,7 +446,7 @@ async def cmd_balance(u, ctx, is_callback=False):
     lines = ["📊 *On-Chain Portfolio - BSC*\n"]
     total_usd = 0.0
     
-    for tok in r["data"]:
+    for tok in d["data"]:
         bal = float(tok.get("balance_amount", 0) or 0)
         if bal <= 0: continue
         sym = tok.get("symbol", "?")
